@@ -175,6 +175,13 @@ type = "http"
 session_file = ".ol-sync/session.json"
 ```
 
+## Using with Agents
+
+If you want a coding agent to help revise the paper, you can also give the
+agent this repository's `SKILL.md` file. It explains the safe `ol` workflow,
+including when to run `ol pull`, how to review staged remote changes, and how
+to push back without overwriting newer Overleaf edits.
+
 ## Development
 
 If you are developing `overleaf-git-sync` itself, install the development

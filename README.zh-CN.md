@@ -172,6 +172,13 @@ type = "http"
 session_file = ".ol-sync/session.json"
 ```
 
+## 配合 Agent 使用
+
+如果你希望本地 coding agent 帮你一起修改论文，也可以把本仓库里的 `SKILL.md`
+ 一并提供给 agent。这个文件专门说明了怎样安全地使用 `ol` 命令，包括什么时候先
+ `ol pull`、怎样处理暂存区里的远端变更、以及怎样在不覆盖 Overleaf 新修改的前提下
+ 推送回去。
+
 ## 安全原则
 
 - 不直接修改 Docker volume、MongoDB、Redis 或 Overleaf 编译缓存
