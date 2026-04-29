@@ -1,15 +1,25 @@
 # overleaf-git-sync
 
-面向自托管 Overleaf Community Edition 的 agent-safe Git 风格同步工具。
+把在线 Overleaf 项目映射成一个本地 Git 工作仓库。
 
-这个项目把本地 Git 当作 AI agent、本地编辑器和 Overleaf CE 之间的安全层：
+这个项目把本地 Git 当作本地编辑器和 Overleaf 之间的安全层：
 
 - 先拉取远端快照到本地
 - 再在本地 Git 仓库里修改、提交
 - 推送前再次拉取远端最新状态
 - 如果 Git 发现冲突，就停止，不静默覆盖远端修改
 
-它不是 Overleaf Server Pro 官方 Git 集成的替代品，也不实现 Git 协议服务器。
+它不是 Overleaf 官方 Git 集成的替代品，也不实现 Git 协议服务器。
+
+## 当前提供的功能
+
+- `ol auth login`：保存一个已登录的 Overleaf 会话到 `.ol-sync/session.json`
+- `ol init`：初始化当前目录的同步配置，并绑定到一个 Overleaf 项目
+- `ol pull`：导入远端最新快照，并把变更放到暂存区等待确认
+- `ol push`：先做 freshness check，再把已提交的本地改动推回 Overleaf
+- `ol push --fast`：跳过 freshness pull，适合你确认本地远端快照已是最新时使用
+- `ol status`：查看当前分支、同步元数据和本地改动概览
+- `ol verify`：下载远端最新快照，并和本地目录做逐文件对比
 
 ## 完整上手流程
 

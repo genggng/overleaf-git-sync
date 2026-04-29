@@ -1,33 +1,33 @@
 # overleaf-git-sync
 
-Agent-safe Git-style synchronization for self-hosted Overleaf Community Edition.
+Map an online Overleaf project to a local Git-backed working repository.
 
 中文文档: [README.zh-CN.md](README.zh-CN.md)
 
-Use local Git as the safety layer between AI coding agents and Overleaf CE. The
-tool treats Overleaf as a single remote project snapshot, imports that snapshot
-into a managed local Git branch, lets Git detect conflicts, and only writes back
-after a freshness check and verification pass.
+Use local Git as the safety layer between your editor and Overleaf. The tool
+treats Overleaf as a remote project snapshot, imports that snapshot into a
+managed local Git branch, lets Git detect conflicts, and only writes back after
+a freshness check and verification pass.
 
-This is not a replacement for the official Overleaf Server Pro Git integration.
-It is an MVP synchronization tool for Community Edition workflows where agents
-edit a local repository.
+This is not a replacement for the official Overleaf Git integration. It is an
+MVP tool for working on an online Overleaf project through a normal local Git
+repository.
 
 ## Current MVP Status
 
-This repository currently provides:
+Important commands:
 
-- `ol init`
-- `ol pull`
-- `ol push`
-- `ol status`
-- `ol verify`
-- `ol auth login/status/logout`
-- An HTTP/session-cookie backend for self-hosted Overleaf CE
-- A backend interface for future `pyoverleaf` implementations
-
-The HTTP backend uses the same web/session behavior as the Overleaf editor. It
-stores cookies in `.ol-sync/session.json`, which is ignored by Git.
+- `ol auth login` — save a logged-in Overleaf session in `.ol-sync/session.json`
+- `ol init` — create local sync metadata and connect the current folder to an
+  Overleaf project
+- `ol pull` — import the latest remote snapshot and stage it for review
+- `ol push` — push committed local changes back to Overleaf after a freshness
+  check
+- `ol push --fast` — skip the freshness pull when you know the local remote
+  snapshot is already up to date
+- `ol status` — show the current branch, sync metadata, and local changes
+- `ol verify` — download the latest remote snapshot and compare it with the
+  local tree
 
 ## End-to-End Workflow
 
