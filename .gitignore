@@ -1,0 +1,16 @@
+.venv/
+.uv-cache/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+test_project/
+example.sh
+.ol-sync/snapshots/
+.ol-sync/tmp/
+.ol-sync/session.json
+.ol-sync/cookies.json
+.ol-sync/*.lock
+.env
+
