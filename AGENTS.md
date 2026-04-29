@@ -1,10 +1,10 @@
 # AGENTS.md
 
-## Project: overleaf-ce-agent-sync
+## Project: overleaf-git-sync
 
 ## Status: V1 Implemented
 
-`overleaf-ce-agent-sync` is now a working V1 Python CLI for agent-safe synchronization between a self-hosted Overleaf Community Edition project and a local Git repository.
+`overleaf-git-sync` is now a working V1 Python CLI for agent-safe synchronization between a self-hosted Overleaf Community Edition project and a local Git repository.
 
 The tool is intentionally not a Git remote helper and not a replacement for Overleaf Server Pro Git integration. It treats Overleaf CE as a remote project state source and publishing target, while local Git remains the conflict-resolution and review layer.
 

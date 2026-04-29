@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "overleaf-ce-agent-sync"
+name = "overleaf-git-sync"
 version = "0.1.0"
 description = "Agent-safe Git-style synchronization for self-hosted Overleaf Community Edition."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "overleaf-ce-agent-sync contributors" }]
+authors = [{ name = "overleaf-git-sync contributors" }]
 dependencies = [
   "requests>=2.31",
   "websocket-client>=1.8",

@@ -37,7 +37,14 @@ def run_git(
 
 
 def is_git_repo(repo: Path) -> bool:
-    return run_git(repo, ["rev-parse", "--is-inside-work-tree"], check=False).returncode == 0
+    result = run_git(repo, ["rev-parse", "--show-toplevel"], check=False)
+    if result.returncode != 0:
+        return False
+    try:
+        top_level = Path(result.stdout.strip()).resolve()
+    except OSError:
+        return False
+    return top_level == repo.resolve()
 
 
 def ensure_git_repo(repo: Path, main_branch: str) -> None:
@@ -86,6 +93,14 @@ def has_unresolved_conflicts(repo: Path) -> bool:
 def conflicted_files(repo: Path) -> list[str]:
     result = run_git(repo, ["diff", "--name-only", "--diff-filter=U"], check=False)
     return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def has_merge_in_progress(repo: Path) -> bool:
+    return (repo / ".git" / "MERGE_HEAD").exists()
+
+
+def quit_merge(repo: Path) -> None:
+    run_git(repo, ["merge", "--quit"], check=False)
 
 
 def head_commit(repo: Path, ref: str = "HEAD") -> str:
@@ -153,8 +168,19 @@ def import_snapshot_to_branch(
     return remote_commit
 
 
-def merge_branch(repo: Path, branch: str, *, commit: bool = True) -> None:
-    args = ["merge", branch, "--no-edit"] if commit else ["merge", "--no-commit", "--no-ff", branch]
+def merge_branch(
+    repo: Path,
+    branch: str,
+    *,
+    commit: bool = True,
+    allow_unrelated_histories: bool = False,
+) -> None:
+    if commit:
+        args = ["merge", branch, "--no-edit"]
+    else:
+        args = ["merge", "--no-commit", "--no-ff", branch]
+    if allow_unrelated_histories:
+        args.append("--allow-unrelated-histories")
     result = run_git(repo, args, check=False)
     if result.returncode != 0:
         files = conflicted_files(repo)

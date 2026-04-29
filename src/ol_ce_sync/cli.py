@@ -22,17 +22,27 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     init = subcommands.add_parser("init", help="initialize sync metadata")
-    init.add_argument("--host", default="http://localhost")
+    init.add_argument("--host", help="override the Overleaf host from the saved login session")
     init.add_argument("--project-id", required=True)
     init.add_argument("--project-name", default="overleaf-project")
     init.add_argument("--backend", default="http", choices=["http", "pyoverleaf"])
     init.add_argument("--force", action="store_true")
+    init.add_argument(
+        "--keep-config",
+        action="store_true",
+        help="keep an existing .ol-sync/config.toml instead of overwriting it",
+    )
 
     pull = subcommands.add_parser("pull", help="import latest remote snapshot and stage it")
     pull.add_argument("--wait", action="store_true")
 
     push = subcommands.add_parser("push", help="apply committed local changes to Overleaf")
     push.add_argument("--dry-run", action="store_true")
+    push.add_argument(
+        "--fast",
+        action="store_true",
+        help="skip the freshness pull and push from the local remote snapshot state",
+    )
     push.add_argument("--wait", action="store_true")
 
     subcommands.add_parser("status", help="show local sync status")
@@ -70,16 +80,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "init":
             engine.init(
-                host=args.host,
+                host=_init_host_from_args(args),
                 project_id=args.project_id,
                 project_name=args.project_name,
                 backend_type=args.backend,
                 force=args.force,
+                overwrite_config=not args.keep_config,
             )
         elif args.command == "pull":
             engine.pull(wait=args.wait)
         elif args.command == "push":
-            engine.push(dry_run=args.dry_run, wait=args.wait)
+            engine.push(dry_run=args.dry_run, fast=args.fast, wait=args.wait)
         elif args.command == "status":
             engine.status()
         elif args.command == "verify":
@@ -117,6 +128,22 @@ def _host_from_args(args) -> str:
     if config is not None:
         return config.project.host
     raise OlSyncError("Missing --host and no .ol-sync/config.toml was found.")
+
+
+def _init_host_from_args(args) -> str:
+    if getattr(args, "host", None):
+        return args.host
+    config = _config_or_none()
+    if config is not None:
+        return config.project.host
+    session_file = Path.cwd() / ".ol-sync" / "session.json"
+    try:
+        return load_auth_session(session_file).host
+    except OlSyncError as exc:
+        raise OlSyncError(
+            "Missing --host and no saved login session was found. "
+            "Run `ol auth login` first or pass --host."
+        ) from exc
 
 
 def handle_auth(args) -> None:

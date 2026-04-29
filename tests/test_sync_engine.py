@@ -6,10 +6,10 @@ import pytest
 
 from ol_ce_sync import git_ops
 from ol_ce_sync.backends.base import ProjectTree
-from ol_ce_sync.config import default_config, write_default_config
-from ol_ce_sync.errors import DirtyWorktreeError
+from ol_ce_sync.config import default_config, load_config, write_default_config
+from ol_ce_sync.errors import ConfigError, DirtyWorktreeError
 from ol_ce_sync.sync_engine import SyncEngine
-from tests.conftest import write
+from tests.conftest import commit_all, write
 
 
 class FakeBackend:
@@ -43,6 +43,19 @@ class FakeBackend:
 
     def move_path(self, project_id: str, old_path: str, new_path: str) -> None:
         raise AssertionError("unexpected move_path call")
+
+
+class RecordingBackend(FakeBackend):
+    def __init__(self, files: dict[str, bytes]) -> None:
+        super().__init__(files)
+        self.text_writes: dict[str, str] = {}
+
+    def write_text_file(self, project_id: str, path: str, content: str) -> None:
+        self.text_writes[path] = content
+        self.files[path] = content.encode("utf-8")
+
+    def create_folder(self, project_id: str, path: str) -> None:
+        return
 
 
 def write_config(repo: Path) -> None:
@@ -105,6 +118,24 @@ def test_pull_stages_remote_changes_instead_of_committing(
     assert metadata_path.read_text(encoding="utf-8").strip() == previous_head
 
 
+def test_pull_noop_clears_merge_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    previous_head = prepare_synced_repo(repo)
+    metadata_path = repo / ".ol-sync" / "last_synced_commit"
+    monkeypatch.setattr(
+        "ol_ce_sync.sync_engine.create_backend",
+        lambda config: FakeBackend({"main.tex": b"base\n"}),
+    )
+
+    SyncEngine(repo).pull()
+
+    assert git_ops.head_commit(repo) == previous_head
+    assert not git_ops.has_dirty_worktree(repo)
+    assert not git_ops.has_merge_in_progress(repo)
+    assert metadata_path.read_text(encoding="utf-8").strip() == previous_head
+
+
 def test_init_appends_default_gitignore_entries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -112,6 +143,7 @@ def test_init_appends_default_gitignore_entries(
     repo.mkdir()
     git_ops.ensure_git_repo(repo, "main")
     (repo / ".gitignore").write_text("custom.log\n", encoding="utf-8")
+    commit_all(repo, "track gitignore")
     monkeypatch.setattr(
         "ol_ce_sync.sync_engine.create_backend",
         lambda config: FakeBackend({"main.tex": b"hello\n"}),
@@ -124,3 +156,113 @@ def test_init_appends_default_gitignore_entries(
     assert ".ol-sync/" in gitignore
     assert "*.aux" in gitignore
     assert "*.run.xml" in gitignore
+
+
+def test_init_on_empty_directory_does_not_fail_before_orphan_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(
+        "ol_ce_sync.sync_engine.create_backend",
+        lambda config: FakeBackend({"main.tex": b"hello\n"}),
+    )
+
+    SyncEngine(repo).init(project_id="project123")
+
+    assert (repo / ".gitignore").exists()
+    assert git_ops.branch_exists(repo, "overleaf-remote")
+
+
+def test_init_refuses_nonempty_directory_without_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    write(repo / "README.md", "existing repo\n")
+    monkeypatch.setattr(
+        "ol_ce_sync.sync_engine.create_backend",
+        lambda config: FakeBackend({"main.tex": b"hello\n"}),
+    )
+
+    with pytest.raises(ConfigError, match="non-empty directory"):
+        SyncEngine(repo).init(project_id="project123")
+
+
+def test_init_allows_existing_git_repo_and_overwrites_config_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git_ops.ensure_git_repo(repo, "main")
+    write(repo / "notes.tex", "local\n")
+    commit_all(repo, "local base")
+    write_config(repo)
+    monkeypatch.setattr(
+        "ol_ce_sync.sync_engine.create_backend",
+        lambda config: FakeBackend({"main.tex": b"remote\n"}),
+    )
+
+    SyncEngine(repo).init(
+        project_id="project999",
+        host="http://example.test",
+        project_name="paper-2",
+    )
+
+    config = default_config(
+        repo,
+        host="http://example.test",
+        project_id="project999",
+        project_name="paper-2",
+    )
+    assert load_config(repo).project == config.project
+
+
+def test_init_can_keep_existing_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git_ops.ensure_git_repo(repo, "main")
+    write(repo / "notes.tex", "local\n")
+    commit_all(repo, "local base")
+    write_config(repo)
+    monkeypatch.setattr(
+        "ol_ce_sync.sync_engine.create_backend",
+        lambda config: FakeBackend({"main.tex": b"remote\n"}),
+    )
+
+    SyncEngine(repo).init(
+        project_id="ignored-project",
+        host="http://ignored.test",
+        project_name="ignored-name",
+        overwrite_config=False,
+    )
+
+    config = load_config(repo)
+    assert config.project.project_id == "project123"
+    assert config.project.host == "http://localhost"
+
+
+def test_push_fast_skips_freshness_pull(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    prepare_synced_repo(repo)
+    write(repo / "main.tex", "updated\n")
+    commit_all(repo, "local update")
+    backend = RecordingBackend({"main.tex": b"base\n"})
+    monkeypatch.setattr("ol_ce_sync.sync_engine.create_backend", lambda config: backend)
+
+    pull_called = False
+
+    def fail_pull(*args, **kwargs):
+        nonlocal pull_called
+        pull_called = True
+        raise AssertionError("freshness pull should be skipped")
+
+    monkeypatch.setattr(SyncEngine, "_pull_no_lock", fail_pull)
+
+    SyncEngine(repo).push(fast=True)
+
+    assert pull_called is False
+    assert backend.text_writes["main.tex"] == "updated\n"

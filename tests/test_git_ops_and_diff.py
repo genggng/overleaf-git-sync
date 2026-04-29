@@ -110,3 +110,20 @@ def test_diff_mapping_handles_add_modify_delete_rename(tmp_path: Path) -> None:
     assert ("M", None, "modify.tex") in simplified
     assert ("D", None, "delete.tex") in simplified
     assert ("R", "old.tex", "new.tex") in simplified
+
+
+def test_nested_directory_inside_parent_repo_is_not_treated_as_initialized_repo(
+    tmp_path: Path,
+) -> None:
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    init_repo(outer)
+    nested = outer / "nested"
+    nested.mkdir()
+
+    assert not git_ops.is_git_repo(nested)
+
+    git_ops.ensure_git_repo(nested, "main")
+
+    assert git_ops.is_git_repo(nested)
+    assert (nested / ".git").exists()

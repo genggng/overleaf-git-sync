@@ -1,4 +1,4 @@
-# overleaf-ce-agent-sync
+# overleaf-git-sync
 
 Agent-safe Git-style synchronization for self-hosted Overleaf Community Edition.
 
@@ -29,143 +29,102 @@ This repository currently provides:
 The HTTP backend uses the same web/session behavior as the Overleaf editor. It
 stores cookies in `.ol-sync/session.json`, which is ignored by Git.
 
-## Typical Workflow
+## End-to-End Workflow
+
+This is the recommended full flow from an empty local folder to a successful
+push back to Overleaf.
+
+### 1. Log in to Overleaf CE
+
+Run login inside the local project directory. The session is stored in
+`.ol-sync/session.json`, and `ol init` will reuse the host from that saved
+session, so you usually do not need to pass `--host` again.
 
 ```bash
+mkdir -p ~/papers/my-paper
 cd ~/papers/my-paper
-ol pull
-# let an agent or editor modify .tex/.bib/.sty/.cls files
-ol status
-git diff --cached
-git commit -m "overleaf: import latest remote snapshot"
-git diff
-git add -A
-git commit -m "agent: revise introduction"
-ol push --dry-run
-ol push
-```
-
-`ol pull` now stages remote changes instead of auto-creating a merge commit. You
-review the staged merge result, then commit it yourself. If the remote snapshot
-is already fully merged, `ol pull` exits cleanly without staging anything.
-
-## Commands
-
-### `ol init`
-
-Initialize sync metadata in the current directory.
-
-- Creates `.ol-sync/config.toml`
-- Creates or appends `.gitignore` with `.ol-sync/` and common LaTeX build
-  artifacts such as `*.aux`, `*.log`, `*.synctex.gz`, `*.run.xml`, and `*.pdf`
-- Authenticates against the configured Overleaf CE host
-- Downloads the first remote snapshot into the managed `overleaf-remote` branch
-- Sets up the working branch and records sync metadata
-
-Example:
-
-```bash
-ol init --host http://localhost --project-id YOUR_PROJECT_ID --project-name my-paper
-```
-
-### `ol pull`
-
-Download the latest Overleaf snapshot into `overleaf-remote`, then stage the
-merge into your current branch without committing it.
-
-- Requires a clean working tree before it starts
-- Leaves merge results in the index for review
-- Stops on Git conflicts and never silently overwrites local work
-- Updates the managed remote snapshot branch even when the working branch still
-  needs your review
-
-Example:
-
-```bash
-ol pull
-git diff --cached
-git commit -m "overleaf: import latest remote snapshot"
-```
-
-### `ol push`
-
-Apply committed local changes back to Overleaf through the backend adapter.
-
-- Requires a clean working tree by default
-- Runs a freshness pull first
-- Refuses to continue if that freshness pull stages newer remote changes
-- Prints a push plan before writing to Overleaf
-- Supports `--dry-run` to preview operations without changing the remote project
-- Verifies the remote snapshot after upload before updating sync metadata
-
-Examples:
-
-```bash
-ol push --dry-run
-ol push
-```
-
-### `ol status`
-
-Print a sync summary for the current repository.
-
-- Current branch
-- Whether the working tree is clean
-- Last synced commit
-- Last imported remote snapshot commit
-- Pending conflicts
-- Files changed locally since the latest imported remote snapshot
-
-Example:
-
-```bash
-ol status
-```
-
-### `ol verify`
-
-Download the latest Overleaf snapshot and compare it with the normalized local
-project tree.
-
-- Prints added, modified, and missing paths
-- Exits non-zero when differences exist unless `--allow-diff` is passed
-
-Example:
-
-```bash
-ol verify
-```
-
-### `ol auth login`
-
-Save an authenticated Overleaf web session for later sync commands.
-
-Use password login:
-
-```bash
 ol auth login --host http://localhost --email you@example.com
 ```
 
-Or reuse a browser cookie:
+If password login is blocked by captcha or SSO, reuse a browser cookie:
 
 ```bash
 ol auth login --host http://localhost --cookie 'sharelatex.sid=...'
 ```
 
-### `ol auth status`
-
-Check whether the saved session is still valid.
+### 2. Initialize the local sync repository
 
 ```bash
-ol auth status --host http://localhost
+ol init --project-id YOUR_PROJECT_ID --project-name my-paper
 ```
 
-### `ol auth logout`
+This step:
 
-Delete the saved local session file.
+- creates `.ol-sync/config.toml`
+- creates or updates `.gitignore`
+- runs `git init` only when the current directory does not already have its own
+  `.git`
+- downloads the initial remote snapshot
+- creates the managed `overleaf-remote` branch
+
+If `.ol-sync/config.toml` already exists, `ol init` overwrites it by default.
+Use `--keep-config` to keep the existing config file.
+
+### 3. Pull the latest remote snapshot
+
+Always pull before editing:
 
 ```bash
-ol auth logout
+ol pull
+git diff --cached
+git commit -m "overleaf: import latest remote snapshot"
+```
+
+`ol pull` stages remote changes instead of auto-creating a merge commit. If the
+remote snapshot is already fully merged, it exits without staging anything.
+
+### 4. Edit locally and commit
+
+```bash
+$EDITOR main.tex
+git diff
+git add -A
+git commit -m "agent: revise introduction"
+```
+
+### 5. Push back to Overleaf
+
+Preview the plan first:
+
+```bash
+ol push --dry-run
+```
+
+Then apply it:
+
+```bash
+ol push
+```
+
+`ol push` performs a freshness pull first. If Overleaf changed again while you
+were editing, it stops and asks you to handle the new staged changes or merge
+conflicts locally before continuing.
+
+If you are the only person editing the project and you know your local
+`overleaf-remote` branch is already fresh, you can skip that pre-push refresh:
+
+```bash
+ol push --fast
+```
+
+`--fast` skips the freshness pull, but still keeps the clean-worktree check and
+the post-push verification step.
+
+### 6. Check status or verify
+
+```bash
+ol status
+ol verify
 ```
 
 ## Configuration

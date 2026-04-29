@@ -42,23 +42,34 @@ class SyncEngine:
         project_name: str = "overleaf-project",
         backend_type: str = "http",
         force: bool = False,
+        overwrite_config: bool = True,
     ) -> None:
-        if not force and not git_ops.is_git_repo(self.repo_root) and self._has_non_sync_content():
-            raise ConfigError("Refusing to initialize a non-empty directory without --force.")
+        is_git_repo = git_ops.is_git_repo(self.repo_root)
+        if not force and not is_git_repo and self._has_non_sync_content():
+            raise ConfigError(
+                "Refusing to initialize a non-empty directory without --force. "
+                "Run `ol init` in a dedicated local project directory."
+            )
 
-        config = default_config(
-            self.repo_root,
-            host=host,
-            project_id=project_id,
-            project_name=project_name,
-            backend_type=backend_type,
-        )
-        write_default_config(config, force=force)
-        ensure_default_gitignore(self.repo_root)
+        config_path = self.repo_root / ".ol-sync" / "config.toml"
+        if config_path.exists() and not overwrite_config:
+            config = load_config(self.repo_root)
+        else:
+            config = default_config(
+                self.repo_root,
+                host=host,
+                project_id=project_id,
+                project_name=project_name,
+                backend_type=backend_type,
+            )
+            write_default_config(config, force=True)
         backend = create_backend(config)
         backend.authenticate()
 
-        git_ops.ensure_git_repo(self.repo_root, config.git.main_branch)
+        if is_git_repo:
+            git_ops.require_clean_worktree(self.repo_root)
+        else:
+            git_ops.ensure_git_repo(self.repo_root, config.git.main_branch)
         with SyncLock(config.resolve_repo_path(config.sync.lock_file)):
             snapshot_dir = self._download_snapshot(config, backend)
             info(f"Importing initial remote snapshot into {config.git.remote_branch}...")
@@ -71,7 +82,11 @@ class SyncEngine:
             )
             self._ensure_on_branch(config.git.main_branch)
             info(f"Merging {config.git.remote_branch} into {config.git.main_branch}...")
-            git_ops.merge_branch(self.repo_root, config.git.remote_branch)
+            git_ops.merge_branch(
+                self.repo_root,
+                config.git.remote_branch,
+                allow_unrelated_histories=is_git_repo,
+            )
             ensure_default_gitignore(self.repo_root)
             head = git_ops.head_commit(self.repo_root)
             self._write_metadata(config.sync.last_synced_file, head)
@@ -84,7 +99,7 @@ class SyncEngine:
         with SyncLock(config.resolve_repo_path(config.sync.lock_file), wait=wait):
             self._pull_no_lock(config, backend)
 
-    def push(self, *, dry_run: bool | None = None, wait: bool = False) -> None:
+    def push(self, *, dry_run: bool | None = None, fast: bool = False, wait: bool = False) -> None:
         config = load_config(self.repo_root)
         backend = create_backend(config)
         dry_run = config.sync.dry_run_default if dry_run is None else dry_run
@@ -94,15 +109,18 @@ class SyncEngine:
             if config.git.require_clean_worktree_before_push:
                 git_ops.require_clean_worktree(self.repo_root)
 
-            info("Running freshness pull before push...")
-            self._pull_no_lock(config, backend)
-            if git_ops.has_unresolved_conflicts(self.repo_root):
-                raise SyncConflictError(git_ops.conflicted_files(self.repo_root))
-            if git_ops.has_dirty_worktree(self.repo_root):
-                raise DirtyWorktreeError(
-                    "Freshness pull staged newer remote changes. "
-                    "Review and commit them before push."
-                )
+            if fast:
+                info("Skipping freshness pull because --fast was set.")
+            else:
+                info("Running freshness pull before push...")
+                self._pull_no_lock(config, backend)
+                if git_ops.has_unresolved_conflicts(self.repo_root):
+                    raise SyncConflictError(git_ops.conflicted_files(self.repo_root))
+                if git_ops.has_dirty_worktree(self.repo_root):
+                    raise DirtyWorktreeError(
+                        "Freshness pull staged newer remote changes. "
+                        "Review and commit them before push."
+                    )
 
             base = git_ops.head_commit(self.repo_root, config.git.remote_branch)
             plan = build_push_plan(self.repo_root, base, config.ignore.patterns)
@@ -201,6 +219,8 @@ class SyncEngine:
         git_ops.merge_branch(self.repo_root, config.git.remote_branch, commit=False)
         self._write_metadata(config.sync.last_remote_snapshot_file, remote_commit)
         if not git_ops.has_dirty_worktree(self.repo_root):
+            if git_ops.has_merge_in_progress(self.repo_root):
+                git_ops.quit_merge(self.repo_root)
             self._write_metadata(config.sync.last_synced_file, git_ops.head_commit(self.repo_root))
             info("Pull completed; local branch already matches the latest remote snapshot.")
             return
@@ -321,7 +341,7 @@ class SyncEngine:
 
     def _has_non_sync_content(self) -> bool:
         for child in self.repo_root.iterdir():
-            if child.name in {".ol-sync"}:
+            if child.name in {".git", ".ol-sync", ".gitignore"}:
                 continue
             return True
         return False

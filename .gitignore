@@ -6,6 +6,8 @@ __pycache__/
 *.egg-info/
 
 test_project/
+paper_debug/
+
 example.sh
 .ol-sync/snapshots/
 .ol-sync/tmp/
@@ -14,3 +16,29 @@ example.sh
 .ol-sync/*.lock
 .env
 
+.ol-sync/
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.glg
+*.glo
+*.gls
+*.idx
+*.ilg
+*.ind
+*.ist
+*.lof
+*.log
+*.lot
+*.nav
+*.out
+*.run.xml
+*.snm
+*.synctex.gz
+*.toc
+*.vrb
+*.xdv
+*.pdf
