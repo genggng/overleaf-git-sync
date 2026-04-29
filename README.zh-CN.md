@@ -64,7 +64,7 @@ ol auth login --host http://localhost --email you@example.com
 ```
 
 如果你用的是官方 Overleaf（`https://www.overleaf.com/`），目前更推荐先在网页端登录，
-再直接复用浏览器 Cookie。你测试可用的 key 是 `overleaf_session2=...`：
+再直接复用浏览器 Cookie。常见可用的 key 是 `overleaf_session2=...`：
 
 ```bash
 ol auth login --host https://www.overleaf.com --cookie 'overleaf_session2=...'

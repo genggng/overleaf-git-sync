@@ -9,6 +9,7 @@ test_project/
 paper_debug/
 
 example.sh
+sharing-posts.md
 .ol-sync/snapshots/
 .ol-sync/tmp/
 .ol-sync/session.json
