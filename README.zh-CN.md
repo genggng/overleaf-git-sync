@@ -2,6 +2,8 @@
 
 把在线 Overleaf 项目映射成一个本地 Git 工作仓库。
 
+![介绍示意图](images/introduction.png)
+
 这个项目把本地 Git 当作本地编辑器和 Overleaf 之间的安全层：
 
 - 先拉取远端快照到本地

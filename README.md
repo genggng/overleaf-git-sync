@@ -2,6 +2,8 @@
 
 Map an online Overleaf project to a local Git-backed working repository.
 
+![Introduction diagram](images/introduction.png)
+
 中文文档: [README.zh-CN.md](README.zh-CN.md)
 
 Use local Git as the safety layer between your editor and Overleaf. The tool
