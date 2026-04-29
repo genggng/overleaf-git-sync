@@ -23,16 +23,39 @@
 - `ol status`：查看当前分支、同步元数据和本地改动概览
 - `ol verify`：下载远端最新快照，并和本地目录做逐文件对比
 
+## 安装
+
+先把工具安装到一个虚拟环境里。安装完成后，只要激活这个环境，就可以在**任意**
+Overleaf 项目目录里直接使用 `ol`，不需要停留在当前仓库目录。
+
+在本仓库根目录执行：
+
+```bash
+uv venv --python 3.13
+uv pip install -e .
+source .venv/bin/activate
+ol --help
+```
+
+激活后，`ol` 会在当前 shell 的 `PATH` 里可用。典型用法是：
+
+```bash
+cd /path/to/overleaf-git-sync
+source .venv/bin/activate
+cd ~/papers/my-paper
+ol auth login --host http://localhost --email you@example.com
+```
+
 ## 完整上手流程
 
 下面演示一遍从空文件夹开始，到登录、初始化、本地修改、提交、推送的完整过程。
 
-### 1. 登录 Overleaf CE
+### 1. 登录 Overleaf
 
 先在本地项目目录里登录。登录后，session 会保存到 `.ol-sync/session.json`，后续
 `ol init` 会直接复用这里面的 host，所以通常不需要再传 `--host`。
 
-密码登录：
+如果你用的是本地 Docker 部署或自托管 Overleaf，通常直接用密码登录最省事：
 
 ```bash
 mkdir -p ~/papers/my-paper
@@ -40,10 +63,11 @@ cd ~/papers/my-paper
 ol auth login --host http://localhost --email you@example.com
 ```
 
-如果你的 Overleaf 开了 captcha、SSO，或者密码登录不方便，也可以直接复用浏览器 Cookie：
+如果你用的是官方 Overleaf（`https://www.overleaf.com/`），目前更推荐先在网页端登录，
+再直接复用浏览器 Cookie。你测试可用的 key 是 `overleaf_session2=...`：
 
 ```bash
-ol auth login --host http://localhost --cookie 'sharelatex.sid=...'
+ol auth login --host https://www.overleaf.com --cookie 'overleaf_session2=...'
 ```
 
 ### 2. 初始化本地同步仓库
@@ -161,7 +185,8 @@ session_file = ".ol-sync/session.json"
 
 ## 开发这个工具时才需要的命令
 
-如果你是在开发 `overleaf-git-sync` 本身，而不是只把它拿来同步论文，可以用：
+如果你是在开发 `overleaf-git-sync` 本身，而不是只把它拿来同步论文，可以再安装
+开发依赖：
 
 ```bash
 uv venv --python 3.13

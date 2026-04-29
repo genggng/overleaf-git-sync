@@ -31,16 +31,43 @@ Important commands:
 - `ol verify` — download the latest remote snapshot and compare it with the
   local tree
 
+## Installation
+
+Install the tool once into a virtual environment, then use `ol` from any
+Overleaf project directory after activating that environment.
+
+From this repository root:
+
+```bash
+uv venv --python 3.13
+uv pip install -e .
+source .venv/bin/activate
+ol --help
+```
+
+After activation, `ol` is available on your shell `PATH`. You do **not** need to
+stay in this repository directory. A typical flow is:
+
+```bash
+cd /path/to/overleaf-git-sync
+source .venv/bin/activate
+cd ~/papers/my-paper
+ol auth login --host http://localhost --email you@example.com
+```
+
 ## End-to-End Workflow
 
 This is the recommended full flow from an empty local folder to a successful
 push back to Overleaf.
 
-### 1. Log in to Overleaf CE
+### 1. Log in to Overleaf
 
 Run login inside the local project directory. The session is stored in
 `.ol-sync/session.json`, and `ol init` will reuse the host from that saved
 session, so you usually do not need to pass `--host` again.
+
+For local Docker or self-hosted deployments, password login is usually the
+simplest option:
 
 ```bash
 mkdir -p ~/papers/my-paper
@@ -48,10 +75,12 @@ cd ~/papers/my-paper
 ol auth login --host http://localhost --email you@example.com
 ```
 
-If password login is blocked by captcha or SSO, reuse a browser cookie:
+For the official Overleaf site (`https://www.overleaf.com/`), browser-cookie
+login is recommended. Log in on the web first, then reuse the cookie value,
+typically `overleaf_session2=...`:
 
 ```bash
-ol auth login --host http://localhost --cookie 'sharelatex.sid=...'
+ol auth login --host https://www.overleaf.com --cookie 'overleaf_session2=...'
 ```
 
 ### 2. Initialize the local sync repository
@@ -147,6 +176,9 @@ session_file = ".ol-sync/session.json"
 ```
 
 ## Development
+
+If you are developing `overleaf-git-sync` itself, install the development
+dependencies as well:
 
 ```bash
 uv venv --python 3.13
