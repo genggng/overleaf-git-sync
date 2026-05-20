@@ -58,6 +58,29 @@ class RecordingBackend(FakeBackend):
         return
 
 
+class EventuallyConsistentDeleteBackend(FakeBackend):
+    def __init__(self, snapshots: list[dict[str, bytes]]) -> None:
+        super().__init__(snapshots[-1])
+        self.snapshots = snapshots
+        self.download_calls = 0
+        self.deleted_paths: list[str] = []
+
+    def download_project_snapshot(self, project_id: str, dest_dir: Path) -> None:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        index = min(self.download_calls, len(self.snapshots) - 1)
+        for rel_path, content in self.snapshots[index].items():
+            path = dest_dir / rel_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        self.download_calls += 1
+
+    def create_folder(self, project_id: str, path: str) -> None:
+        return
+
+    def delete_path(self, project_id: str, path: str) -> None:
+        self.deleted_paths.append(path)
+
+
 def write_config(repo: Path) -> None:
     write_default_config(default_config(repo, project_id="project123"))
 
@@ -303,3 +326,54 @@ def test_push_fast_skips_freshness_pull(tmp_path: Path, monkeypatch: pytest.Monk
 
     assert pull_called is False
     assert backend.text_writes["main.tex"] == "updated\n"
+
+
+def test_push_retries_verification_for_eventually_consistent_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git_ops.ensure_git_repo(repo, "main")
+    write_config(repo)
+    snapshot = repo.parent / f"{repo.name}-initial-snapshot"
+    snapshot.mkdir(parents=True, exist_ok=True)
+    write(snapshot / "main.tex", "base\n")
+    write(snapshot / "Chapter" / "Chapter_07_system_eval.tex", "old\n")
+    remote_commit = git_ops.import_snapshot_to_branch(
+        repo,
+        snapshot,
+        branch="overleaf-remote",
+        patterns=[".ol-sync/"],
+        message="overleaf: initial snapshot",
+    )
+    git_ops.merge_branch(repo, "overleaf-remote")
+    (repo / "Chapter" / "Chapter_07_system_eval.tex").unlink()
+    commit_all(repo, "delete chapter 7")
+    metadata_dir = repo / ".ol-sync"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    head = git_ops.head_commit(repo)
+    (metadata_dir / "last_synced_commit").write_text(head + "\n", encoding="utf-8")
+    (metadata_dir / "last_remote_snapshot_commit").write_text(
+        remote_commit + "\n", encoding="utf-8"
+    )
+
+    backend = EventuallyConsistentDeleteBackend(
+        [
+            {
+                "main.tex": b"base\n",
+                "Chapter/Chapter_07_system_eval.tex": b"old\n",
+            },
+            {
+                "main.tex": b"base\n",
+                "Chapter/Chapter_07_system_eval.tex": b"old\n",
+            },
+            {"main.tex": b"base\n"},
+        ]
+    )
+    monkeypatch.setattr("ol_ce_sync.sync_engine.create_backend", lambda config: backend)
+    monkeypatch.setattr("ol_ce_sync.sync_engine.time.sleep", lambda _: None)
+
+    SyncEngine(repo).push(fast=True)
+
+    assert backend.deleted_paths == ["Chapter/Chapter_07_system_eval.tex"]
+    assert backend.download_calls == 3

@@ -101,16 +101,26 @@ class HttpBackend:
         return current
 
     def delete_path(self, project_id: str, path: str) -> None:
-        entity = self._find_entity(project_id, path)
-        if entity is None:
-            return
-        self._request(
-            "DELETE",
-            f"/project/{project_id}/{entity.type}/{entity.id}",
-            json={},
-            csrf_project_id=project_id,
-        )
-        self._tree_cache = None
+        normalized = normalize_project_path(path)
+        for _ in range(2):
+            entity = self._find_entity(project_id, normalized, refresh=True)
+            if entity is None:
+                if not self._path_exists_in_entities(project_id, normalized):
+                    return
+                raise BackendError(
+                    f"Cannot resolve remote entity for deletion: {normalized}"
+                )
+            self._request(
+                "DELETE",
+                f"/project/{project_id}/{entity.type}/{entity.id}",
+                json={},
+                csrf_project_id=project_id,
+            )
+            self._tree_cache = None
+            if not self._path_exists_in_entities(project_id, normalized):
+                return
+            time.sleep(0.2)
+        raise BackendError(f"Remote delete did not remove path: {normalized}")
 
     def move_path(self, project_id: str, old_path: str, new_path: str) -> None:
         entity = self._find_entity(project_id, old_path)
@@ -211,6 +221,7 @@ class HttpBackend:
         session = self._require_session()
         csrf_project_id = kwargs.pop("csrf_project_id", None)
         headers = kwargs.pop("headers", {})
+        allow_redirects = kwargs.pop("allow_redirects", method.upper() == "GET")
         headers = {
             "Accept": "application/json, text/plain, */*",
             "Referer": f"{self.host}/project/{csrf_project_id or self.config.project.project_id}",
@@ -223,8 +234,14 @@ class HttpBackend:
             f"{self.host}{path}",
             headers=headers,
             timeout=self.timeout,
+            allow_redirects=allow_redirects,
             **kwargs,
         )
+        if 300 <= response.status_code < 400:
+            raise BackendError(
+                f"Overleaf HTTP {method} {path} redirected unexpectedly to "
+                f"{response.headers.get('Location', '(unknown)')}"
+            )
         if response.status_code >= 400:
             raise BackendError(
                 f"Overleaf HTTP {method} {path} failed with HTTP {response.status_code}: "
@@ -304,7 +321,10 @@ class HttpBackend:
         )
 
     def _entity_from_socket_folder(self, data: dict, parent_path: str) -> HttpEntity:
-        path = self._join_path(parent_path, data["name"]) if parent_path else ""
+        if not parent_path and data["name"] == "rootFolder":
+            path = ""
+        else:
+            path = self._join_path(parent_path, data["name"])
         folder = HttpEntity(id=data["_id"], name=data["name"], type="folder", path=path)
         for child in data.get("folders", []):
             folder.children.append(self._entity_from_socket_folder(child, path))
@@ -356,6 +376,19 @@ class HttpBackend:
         if entity is None or entity.type != "folder":
             return None
         return entity
+
+    def _path_exists_in_entities(self, project_id: str, path: str) -> bool:
+        normalized = normalize_project_path(path)
+        response = self._request("GET", f"/project/{project_id}/entities")
+        data = response.json()
+        for entity in data.get("entities", []):
+            entity_path = entity.get("path")
+            if not entity_path:
+                continue
+            candidate = normalize_project_path(entity_path.lstrip("/"))
+            if candidate == normalized:
+                return True
+        return False
 
     def _child_named(
         self,

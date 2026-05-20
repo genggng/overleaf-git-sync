@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from ol_ce_sync.backends.http_backend import HttpBackend, HttpEntity
 from ol_ce_sync.config import default_config
+from ol_ce_sync.errors import BackendError
 
 
 def make_backend(tmp_path: Path) -> HttpBackend:
@@ -68,6 +72,24 @@ def test_http_backend_find_entity_by_path(tmp_path: Path) -> None:
     assert entity.id == "doc1"
 
 
+def test_entity_from_socket_folder_preserves_top_level_folder_path(tmp_path: Path) -> None:
+    backend = make_backend(tmp_path)
+
+    folder = backend._entity_from_socket_folder(
+        {
+            "_id": "folder-chapter",
+            "name": "Chapter",
+            "folders": [],
+            "fileRefs": [],
+            "docs": [{"_id": "doc-7", "name": "Chapter_07_system_eval.tex"}],
+        },
+        "",
+    )
+
+    assert folder.path == "Chapter"
+    assert folder.children[0].path == "Chapter/Chapter_07_system_eval.tex"
+
+
 def test_create_folder_returns_new_folder_entity_without_requery(tmp_path: Path) -> None:
     backend = make_backend(tmp_path)
     backend._tree_cache = HttpEntity(
@@ -126,3 +148,69 @@ def test_http_backend_replace_file_renames_old_to_backup_before_delete(tmp_path:
     assert calls[1] == ("POST", "/project/project123/doc/old-id/rename")
     assert calls[2] == ("POST", "/project/project123/doc/temp-id/rename")
     assert calls[3] == ("DELETE", "/project/project123/doc/old-id")
+
+
+def test_delete_path_deletes_after_refresh_hit(tmp_path: Path) -> None:
+    backend = make_backend(tmp_path)
+    calls: list[tuple[str, str]] = []
+    entity = HttpEntity(
+        id="doc-7",
+        name="Chapter_07_system_eval.tex",
+        type="doc",
+        path="Chapter/Chapter_07_system_eval.tex",
+    )
+    lookups = iter([entity, None])
+
+    def find_entity(project_id: str, path: str, refresh: bool = False):
+        return next(lookups)
+
+    def request(method: str, path: str, **kwargs):
+        calls.append((method, path))
+
+        class Response:
+            def json(self):
+                return {}
+
+        return Response()
+
+    backend._find_entity = find_entity
+    backend._request = request
+    backend._path_exists_in_entities = lambda project_id, path: False
+
+    backend.delete_path("project123", "Chapter/Chapter_07_system_eval.tex")
+
+    assert calls == [("DELETE", "/project/project123/doc/doc-7")]
+
+
+def test_delete_path_raises_when_remote_entity_cannot_be_resolved(tmp_path: Path) -> None:
+    backend = make_backend(tmp_path)
+    backend._find_entity = lambda project_id, path, refresh=False: None
+    backend._path_exists_in_entities = lambda project_id, path: True
+
+    with pytest.raises(BackendError, match="Cannot resolve remote entity for deletion"):
+        backend.delete_path("project123", "Chapter/Chapter_07_system_eval.tex")
+
+
+def test_delete_path_returns_when_entity_is_absent_from_public_entities(tmp_path: Path) -> None:
+    backend = make_backend(tmp_path)
+    backend._find_entity = lambda project_id, path, refresh=False: None
+    backend._path_exists_in_entities = lambda project_id, path: False
+
+    backend.delete_path("project123", "Chapter/Chapter_07_system_eval.tex")
+
+
+def test_request_rejects_unexpected_redirects(tmp_path: Path) -> None:
+    backend = make_backend(tmp_path)
+
+    class Session:
+        def request(self, method: str, url: str, **kwargs):
+            return SimpleNamespace(
+                status_code=302,
+                headers={"Location": "/login"},
+                text="",
+            )
+
+    backend._session = Session()
+
+    with pytest.raises(BackendError, match="redirected unexpectedly"):
+        backend._request("DELETE", "/project/project123/doc/doc-7")

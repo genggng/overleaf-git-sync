@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -139,7 +140,12 @@ class SyncEngine:
             info("Applying push plan through backend...")
             self._apply_push_plan(config, backend, plan)
             verification_snapshot = self._download_snapshot(config, backend)
-            self._verify_snapshot_matches_local(config, verification_snapshot)
+            self._verify_snapshot_matches_local(
+                config,
+                backend,
+                verification_snapshot,
+                plan=plan,
+            )
             info("Verification succeeded.")
 
             remote_commit = git_ops.import_snapshot_to_branch(
@@ -295,11 +301,38 @@ class SyncEngine:
         backend.download_project_snapshot(config.project.project_id, snapshot_dir)
         return snapshot_dir
 
-    def _verify_snapshot_matches_local(self, config: Config, snapshot_dir: Path) -> None:
-        diff = self._snapshot_diff_against_local(config, snapshot_dir)
-        if diff.has_changes:
+    def _verify_snapshot_matches_local(
+        self,
+        config: Config,
+        backend: OverleafBackend,
+        snapshot_dir: Path,
+        *,
+        plan: Iterable[PushOperation] | None = None,
+    ) -> None:
+        push_plan = tuple(plan or ())
+        retries = 3 if push_plan else 0
+        delay = 0.5
+        for attempt in range(retries + 1):
+            diff = self._snapshot_diff_against_local(config, snapshot_dir)
+            if not diff.has_changes:
+                return
+            if attempt < retries and self._can_retry_verification(diff, push_plan):
+                time.sleep(delay)
+                delay *= 2
+                snapshot_dir = self._download_snapshot(config, backend)
+                continue
             self._print_tree_diff(diff)
             raise VerificationError("Remote verification failed; sync metadata was not updated.")
+
+    def _can_retry_verification(self, diff, plan: tuple[PushOperation, ...]) -> bool:
+        deleted_paths = {op.path for op in plan if op.status == "D"}
+        if not deleted_paths:
+            return False
+        if diff.modified or diff.deleted:
+            return False
+        if not diff.added:
+            return False
+        return set(diff.added).issubset(deleted_paths)
 
     def _snapshot_diff_against_local(self, config: Config, snapshot_dir: Path):
         expected = collect_tree(self.repo_root, config.ignore.patterns)
