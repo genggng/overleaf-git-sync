@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import requests
 
 from ol_ce_sync.errors import BackendError, ConfigError
+from ol_ce_sync.utils.files import atomic_write_text
 
 
 class CsrfParser(HTMLParser):
@@ -43,30 +44,38 @@ class AuthSession:
     profile: str
     cookies: tuple[StoredCookie, ...]
     created_at: float
+    ssl_verify: bool = True
 
     def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "host": self.host,
             "profile": self.profile,
             "created_at": self.created_at,
+            "ssl_verify": self.ssl_verify,
             "cookies": [cookie.__dict__ for cookie in self.cookies],
         }
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        path.chmod(0o600)
+        atomic_write_text(
+            path,
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            mode=0o600,
+        )
 
     @classmethod
     def load(cls, path: Path) -> AuthSession:
         if not path.exists():
             raise ConfigError(f"Missing auth session file: {path}")
-        data = json.loads(path.read_text(encoding="utf-8"))
-        cookies = tuple(StoredCookie(**cookie) for cookie in data.get("cookies", []))
-        return cls(
-            host=str(data["host"]),
-            profile=str(data.get("profile", "default")),
-            cookies=cookies,
-            created_at=float(data.get("created_at", 0)),
-        )
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            cookies = tuple(StoredCookie(**cookie) for cookie in data.get("cookies", []))
+            return cls(
+                host=str(data["host"]),
+                profile=str(data.get("profile", "default")),
+                cookies=cookies,
+                created_at=float(data.get("created_at", 0)),
+                ssl_verify=bool(data.get("ssl_verify", True)),
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ConfigError(f"Invalid auth session file: {path}") from exc
 
     def build_requests_session(self, *, ssl_verify: bool = True) -> requests.Session:
         session = requests.Session()
@@ -104,7 +113,13 @@ def extract_csrf_token(html: str) -> str:
     return parser.token
 
 
-def session_from_cookie_header(host: str, profile: str, cookie_header: str) -> AuthSession:
+def session_from_cookie_header(
+    host: str,
+    profile: str,
+    cookie_header: str,
+    *,
+    ssl_verify: bool = True,
+) -> AuthSession:
     domain = host_cookie_domain(host)
     cookies: list[StoredCookie] = []
     for item in cookie_header.split(";"):
@@ -121,6 +136,7 @@ def session_from_cookie_header(host: str, profile: str, cookie_header: str) -> A
         profile=profile,
         cookies=tuple(cookies),
         created_at=time.time(),
+        ssl_verify=ssl_verify,
     )
 
 
@@ -139,20 +155,26 @@ def login_with_password(
     session = requests.Session()
     session.verify = ssl_verify
 
-    login_page = session.get(f"{host}/login", timeout=timeout)
-    login_page.raise_for_status()
+    try:
+        login_page = session.get(f"{host}/login", timeout=timeout)
+        login_page.raise_for_status()
+    except requests.RequestException as exc:
+        raise BackendError(f"Could not open Overleaf login page: {exc}") from exc
     csrf = extract_csrf_token(login_page.text)
 
-    response = session.post(
-        f"{host}/login",
-        data={"email": email, "password": password, "_csrf": csrf},
-        headers={
-            "Accept": "application/json, text/plain, */*",
-            "Referer": f"{host}/login",
-        },
-        timeout=timeout,
-        allow_redirects=False,
-    )
+    try:
+        response = session.post(
+            f"{host}/login",
+            data={"email": email, "password": password, "_csrf": csrf},
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Referer": f"{host}/login",
+            },
+            timeout=timeout,
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        raise BackendError(f"Overleaf login request failed: {exc}") from exc
     if response.status_code >= 400:
         raise BackendError(
             "Overleaf login failed. Check credentials, captcha settings, and server logs."
@@ -172,7 +194,13 @@ def login_with_password(
         )
         for cookie in session.cookies
     )
-    return AuthSession(host=host, profile=profile, cookies=cookies, created_at=time.time())
+    return AuthSession(
+        host=host,
+        profile=profile,
+        cookies=cookies,
+        created_at=time.time(),
+        ssl_verify=ssl_verify,
+    )
 
 
 @dataclass(frozen=True)

@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+.DS_Store
 
 test_project/
 paper_debug/

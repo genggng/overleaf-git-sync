@@ -19,9 +19,10 @@
 - `ol init`：初始化当前目录的同步配置，并绑定到一个 Overleaf 项目
 - `ol pull`：导入远端最新快照，并把变更放到暂存区等待确认
 - `ol push`：先做 freshness check，再把已提交的本地改动推回 Overleaf
-- `ol push --fast`：跳过 freshness pull，适合你确认本地远端快照已是最新时使用
+- `ol push --fast`：跳过远端快照的 Git 合并，但写入前仍检查远端基线
 - `ol status`：查看当前分支、同步元数据和本地改动概览
 - `ol verify`：下载远端最新快照，并和本地目录做逐文件对比
+- `ol recover`：把中断 Push 的远端状态重新导入 Git
 
 ## 安装
 
@@ -67,8 +68,12 @@ ol auth login --host http://localhost --email you@example.com
 再直接复用浏览器 Cookie。常见可用的 key 是 `overleaf_session2=...`：
 
 ```bash
-ol auth login --host https://www.overleaf.com --cookie 'overleaf_session2=...'
+printf '%s' 'overleaf_session2=...' | \
+  ol auth login --host https://www.overleaf.com --cookie-stdin
 ```
+
+`--cookie` 和 `--password` 仍为兼容旧脚本而保留，但可能把凭据暴露在 shell history
+或进程列表里；新脚本应使用 stdin 参数或交互式密码提示。
 
 ### 2. 初始化本地同步仓库
 
@@ -86,6 +91,11 @@ ol init --project-id YOUR_PROJECT_ID --project-name my-paper
 
 如果当前目录已经有 `.ol-sync/config.toml`，`ol init` 默认会覆盖它；传
 `--keep-config` 可以保留原配置。
+
+非 Git 目录不是空目录时仍需传 `--force`，但工具现在会先创建
+`local: pre-sync safety snapshot` 提交，不再直接删除原有文件。重新绑定到另一个
+Overleaf 项目也必须显式传 `--force`。符号链接、submodule、嵌套 Git 仓库以及在其他
+worktree 中检出的 `overleaf-remote` 分支会被拒绝。
 
 ### 3. 拉取远端最新修改
 
@@ -123,14 +133,25 @@ git commit -m "agent: revise introduction"
 ol push --dry-run
 ```
 
+`--dry-run` 只使用本地保存的 `overleaf-remote` 快照生成计划，不访问 Overleaf，也不
+执行 freshness pull。
+
 确认没问题后正式推送：
 
 ```bash
 ol push
 ```
 
-`ol push` 会先自动做一次 freshness pull。如果远端在你编辑期间又变了，它会先停下来，
-要求你处理新的暂存变更或冲突，而不是直接覆盖 Overleaf。
+`ol push` 会先自动做 freshness pull，并在每个远端操作之前再次下载和核对远端树。
+每一步都会记录在 `.ol-sync/push_journal.json`。如果远端请求中断，新的 Push 会被阻止，
+先运行：
+
+```bash
+ol recover
+```
+
+恢复命令会把当前远端状态导入 `overleaf-remote` 并交给 Git 合并；若有冲突，解决并提交
+后再 Push。
 
 如果你明确知道当前项目只有你一个人在改，并且本地的 `overleaf-remote` 已经是最新的，
 可以用更快的模式直接跳过 freshness pull：
@@ -139,7 +160,8 @@ ol push
 ol push --fast
 ```
 
-`--fast` 会跳过推送前的远端刷新检查，但仍然保留本地工作区检查和推送后的远端验证。
+`--fast` 只跳过 freshness snapshot 的 Git 导入/合并，仍要求实时远端树与本地保存的
+远端基线一致，并保留写入后验证。
 
 ### 6. 查看状态或校验
 
@@ -187,6 +209,22 @@ session_file = ".ol-sync/session.json"
 - 推送前必须重新拉取远端快照
 - 有冲突就停
 - 写回后必须重新验证远端结果
+
+HTTP 后端使用 Overleaf CE 的网页内部路由。工具会在每个写操作前检查完整远端快照，
+并在最后再次验证。更新已有可编辑文档时，工具会通过 Overleaf 的 `joinDoc` /
+`applyOtUpdate` 通道提交带文档版本号的最小文本操作，并重新下载该文档进行精确校验；
+遇到尚未支持的 OT 类型会停止，而不会退回到无版本覆盖。
+旧版 `sharejs-text-ot` 也无法安全插入非 BMP Unicode 字符（例如许多 emoji 和数学字母）；
+工具会在远端写入前拒绝这类更新，避免服务端把 UTF-16 代理项替换成 `U+FFFD`。
+
+上传、重命名、删除和目录路由仍没有原子版本条件，因此二进制文件、新建文件和目录操作
+存在一个很窄的“检查请求到写请求”窗口。重要协作项目应避免在 Push 的几秒内同时在线
+修改这些路径。响应丢失时，文件替换会重新读取远端实体树进行补偿；push journal 和最终
+快照校验保证这类异常不会被静默标记为成功。
+
+默认忽略规则不再排除全部 PDF、BBL 和 IST 文件，因为它们可能是论文源素材。同步忽略
+规则也不再近似复用 `.gitignore`；已经被 Git 跟踪的文件仍会同步。需要排除的内容应写入
+`.ol-sync/config.toml` 的 `[ignore]`。
 
 最高优先级是不让陈旧的本地输出静默覆盖 Overleaf 上的新修改。
 

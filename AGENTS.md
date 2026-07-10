@@ -11,7 +11,7 @@ The tool is intentionally not a Git remote helper and not a replacement for Over
 Core data flow:
 
 ```text
-Overleaf CE project  <-->  ol-ce-sync HTTP backend  <-->  local Git repo  <-->  agent / editor
+Overleaf CE project  <-->  ol HTTP backend  <-->  local Git repo  <-->  agent / editor
 ```
 
 The highest-priority invariant remains:
@@ -27,33 +27,33 @@ Never silently overwrite newer Overleaf changes with stale local agent output.
 Authenticate once:
 
 ```bash
-ol-ce-sync auth login --host http://localhost --email you@example.com
-ol-ce-sync auth status --host http://localhost
+ol auth login --host http://localhost --email you@example.com
+ol auth status --host http://localhost
 ```
 
 If password login is blocked by captcha, SSO, or local deployment policy, log in through the browser and pass a raw Cookie header:
 
 ```bash
-ol-ce-sync auth login --host http://localhost --cookie 'sharelatex.sid=...'
+printf '%s' 'sharelatex.sid=...' | ol auth login --host http://localhost --cookie-stdin
 ```
 
 Initialize a local repo against a real Overleaf project:
 
 ```bash
-ol-ce-sync init --host http://localhost --project-id YOUR_PROJECT_ID --project-name my-paper
+ol init --host http://localhost --project-id YOUR_PROJECT_ID --project-name my-paper
 ```
 
 Normal edit loop:
 
 ```bash
-ol-ce-sync pull
+ol pull
 # agent/editor modifies .tex/.bib/.sty/.cls/etc.
-ol-ce-sync status
+ol status
 git diff
 git add -A
 git commit -m "agent: revise introduction"
-ol-ce-sync push --dry-run
-ol-ce-sync push
+ol push --dry-run
+ol push
 ```
 
 If Git reports conflicts, resolve locally, commit, then retry:
@@ -62,14 +62,14 @@ If Git reports conflicts, resolve locally, commit, then retry:
 git status
 git add conflicted-file.tex
 git commit -m "resolve Overleaf sync conflict"
-ol-ce-sync push
+ol push
 ```
 
 ---
 
 ## Implemented Commands
 
-### `ol-ce-sync auth login`
+### `ol auth login`
 
 Creates `.ol-sync/session.json` containing Overleaf session cookies. This file is ignored by Git and must never be committed.
 
@@ -78,15 +78,15 @@ Supported modes:
 - `--email` plus password prompt, using Overleaf `/login`
 - `--cookie`, using a raw browser Cookie header
 
-### `ol-ce-sync auth status`
+### `ol auth status`
 
 Checks the saved session against Overleaf `/user/personal_info`.
 
-### `ol-ce-sync auth logout`
+### `ol auth logout`
 
 Deletes the local session file.
 
-### `ol-ce-sync init`
+### `ol init`
 
 Initializes sync metadata and Git state for a real Overleaf CE project.
 
@@ -97,25 +97,27 @@ Current behavior:
 3. Validates the saved HTTP session.
 4. Downloads the remote project zip snapshot.
 5. Initializes Git if needed.
-6. Imports the remote snapshot into `overleaf-remote`.
-7. Creates or switches back to `main`.
+6. Creates the `overleaf-remote` commit with a temporary Git index, without
+   checking out or rewriting the user's working tree.
+7. Initializes `main` from the snapshot when the branch is unborn.
 8. Merges `overleaf-remote` into `main`.
-9. Records sync metadata under `.ol-sync/`.
+9. Records sync metadata and managed-branch ownership under `.ol-sync/`.
 
-`--force` is required to initialize in a non-empty non-Git directory.
+`--force` is required to initialize in a non-empty non-Git directory. The tool
+first creates a local safety commit so existing files are recoverable.
 
-### `ol-ce-sync pull`
+### `ol pull`
 
 Downloads the latest Overleaf snapshot, imports it into `overleaf-remote`, and merges it into the current working branch.
 
 Conservative behavior:
 
 - Acquires `.ol-sync/lock`.
-- Aborts on a dirty worktree unless `--autostash` is passed.
+- Aborts on a dirty worktree. There is no automatic stash or conflict resolution.
 - Uses Git merge for conflict detection.
 - Stops and reports conflicted files on merge conflict.
 
-### `ol-ce-sync push`
+### `ol push`
 
 Applies committed local changes back to Overleaf.
 
@@ -123,16 +125,21 @@ Current behavior:
 
 1. Acquires `.ol-sync/lock`.
 2. Requires a clean worktree by default.
-3. Performs an internal freshness pull before generating the push plan.
-4. Computes changes with `git diff --name-status --find-renames`.
+3. Performs an internal freshness pull before a real push. `--dry-run` is local-only.
+4. Computes changes with NUL-delimited `git diff --name-status --find-renames`.
 5. Prints the planned operations.
-6. Honors `--dry-run`.
-7. Applies file operations through the HTTP backend.
+6. Checks the complete live remote tree immediately before every operation.
+7. Journals each operation and applies it through the HTTP backend.
 8. Downloads a fresh Overleaf snapshot.
 9. Verifies remote normalized state against local normalized state.
-10. Updates sync metadata only after verification succeeds.
+10. Updates sync metadata only after verification succeeds and clears the journal.
 
-### `ol-ce-sync status`
+### `ol recover`
+
+Imports the remote state left by an interrupted push into `overleaf-remote` and
+uses Git merge/conflict handling before another push is allowed.
+
+### `ol status`
 
 Prints local sync state:
 
@@ -143,7 +150,7 @@ Prints local sync state:
 - conflicted files
 - local changes since the latest remote snapshot
 
-### `ol-ce-sync verify`
+### `ol verify`
 
 Downloads the latest Overleaf snapshot and compares it with the local normalized project tree. Exits nonzero on mismatch unless `--allow-diff` is passed.
 
@@ -168,9 +175,7 @@ project_name = "my-paper"
 [git]
 main_branch = "main"
 remote_branch = "overleaf-remote"
-remote_name = "origin"
 require_clean_worktree_before_push = true
-commit_remote_snapshots = true
 
 [backend]
 type = "http"
@@ -191,17 +196,17 @@ dry_run_default = false
 [ignore]
 patterns = [
   ".git/",
+  ".gitignore",
+  ".env",
   ".ol-sync/",
   "*.aux",
-  "*.bbl",
   "*.blg",
   "*.fdb_latexmk",
   "*.fls",
   "*.log",
   "*.out",
   "*.synctex.gz",
-  "*.toc",
-  "*.pdf"
+  "*.toc"
 ]
 ```
 
@@ -239,11 +244,14 @@ Key modules:
 - `git_ops.py`: all Git subprocess calls; Git remains the only merge/conflict engine.
 - `snapshot.py`: safe zip extraction, ignore matching, normalized tree collection, tree comparison.
 - `diff.py`: maps Git name-status diff to push operations.
-- `lock.py`: `.ol-sync/lock` transaction lock.
+- `journal.py`: durable interrupted-push journal used by `ol recover`.
+- `lock.py`: crash-aware `.ol-sync/lock` transaction lock.
+- `project_safety.py`: rejects symlinks, submodules, and nested repositories.
 - `errors.py`: user-facing domain exceptions.
 - `utils/paths.py`: project path normalization and traversal rejection.
 - `utils/text.py`: text/binary classification.
-- `utils/logging.py`: simple `[ol-ce-sync]` output.
+- `utils/logging.py`: simple `[ol]` output.
+- `utils/files.py`: restrictive atomic metadata and credential writes.
 
 Backend modules:
 
@@ -264,18 +272,23 @@ There is intentionally no mock backend in V1. Development should target the real
 - validates sessions through `/user/personal_info`
 - gets CSRF tokens from the project page meta tag `ol-csrfToken`
 - opens the Overleaf socket.io project session to read the editor entity tree and entity IDs
+- updates existing editable documents through versioned `joinDoc` / `applyOtUpdate`
+- verifies OT results through `/Project/{project_id}/doc/{doc_id}/download`
 - creates folders through `/project/{project_id}/folder`
 - uploads files through `/Project/{project_id}/upload?folder_id=...`
 - deletes entities through `/project/{project_id}/{entity_type}/{entity_id}`
 - renames/moves entities through editor HTTP routes
 
-Updating an existing remote file is implemented conservatively:
+Existing editable text documents use versioned OT. Existing binary/file
+entities are replaced conservatively:
 
 ```text
 upload temp replacement -> rename old file to backup -> rename temp to final name -> delete backup
 ```
 
-The sync engine still performs a full snapshot verification after push, and does not mark sync success until verification passes.
+Ambiguous replacement errors refresh the entity tree and reconcile by stable
+entity IDs. The sync engine still performs a full snapshot verification after
+push, and does not mark sync success until verification passes.
 
 ---
 
@@ -292,11 +305,11 @@ The `overleaf-remote` branch is tool-managed. Agents and users should not edit i
 
 Snapshot import behavior:
 
-1. switch/create `overleaf-remote`
-2. replace syncable repo contents with the normalized remote snapshot
-3. commit snapshot, allowing an empty initial snapshot commit when necessary
-4. switch back to the working branch
-5. merge `overleaf-remote`
+1. hash normalized snapshot files directly into the Git object database
+2. build a temporary index and tree without touching the user's index/worktree
+3. create a snapshot commit with `git commit-tree` (no hooks or signing)
+4. atomically update the owned `overleaf-remote` ref
+5. merge `overleaf-remote` into the working branch through normal Git
 
 All merge conflict detection is delegated to Git.
 
@@ -326,7 +339,7 @@ Conflicted files:
   - sections/method.tex
 
 Resolve conflicts locally, commit the result, then run:
-  ol-ce-sync push
+  ol push
 ```
 
 ---
@@ -362,6 +375,7 @@ Current tests cover:
 - auth session JSON round-trip
 - CSRF token extraction
 - HTTP backend entity flattening and conservative replacement ordering
+- versioned ShareJS text operations and ambiguous-response compensation
 - safe zip extraction
 - ignore rules and normalized tree comparison
 - text/binary detection
@@ -370,6 +384,12 @@ Current tests cover:
 - Git diff mapping for A/M/D/R
 
 Tests do not require a live Overleaf CE instance. End-to-end verification against a real Overleaf deployment should be performed manually with a disposable project before changing write behavior.
+
+`tests/test_live_overleaf.py` and `LIVE_TESTING.md` provide the opt-in read and
+disposable-write compatibility workflow. Live writes require
+`OL_LIVE_ALLOW_WRITE=1`; lost-response injection additionally requires
+`OL_LIVE_ALLOW_FAULT_INJECTION=1`, and concurrent OT testing requires
+`OL_LIVE_ALLOW_CONCURRENT_OT=1`. None may target an important project.
 
 ---
 

@@ -6,19 +6,21 @@ import argparse
 import sys
 from pathlib import Path
 
+from ol_ce_sync import __version__
 from ol_ce_sync.auth import (
     check_session,
     load_auth_session,
     login_with_password,
     session_from_cookie_header,
 )
-from ol_ce_sync.config import load_config
+from ol_ce_sync.config import ensure_gitignore_entry, load_config
 from ol_ce_sync.errors import OlSyncError
 from ol_ce_sync.sync_engine import SyncEngine
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ol")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     init = subcommands.add_parser("init", help="initialize sync metadata")
@@ -27,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--project-name", default="overleaf-project")
     init.add_argument("--backend", default="http", choices=["http", "pyoverleaf"])
     init.add_argument("--force", action="store_true")
+    init.add_argument("--insecure", action="store_true", help="disable TLS verification")
     init.add_argument(
         "--keep-config",
         action="store_true",
@@ -36,12 +39,15 @@ def build_parser() -> argparse.ArgumentParser:
     pull = subcommands.add_parser("pull", help="import latest remote snapshot and stage it")
     pull.add_argument("--wait", action="store_true")
 
+    recover = subcommands.add_parser("recover", help="recover an interrupted push through Git")
+    recover.add_argument("--wait", action="store_true")
+
     push = subcommands.add_parser("push", help="apply committed local changes to Overleaf")
     push.add_argument("--dry-run", action="store_true")
     push.add_argument(
         "--fast",
         action="store_true",
-        help="skip the freshness pull and push from the local remote snapshot state",
+        help="skip freshness import but require the live remote to match the saved baseline",
     )
     push.add_argument("--wait", action="store_true")
 
@@ -49,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify = subcommands.add_parser("verify", help="compare local state with remote snapshot")
     verify.add_argument("--allow-diff", action="store_true")
+    verify.add_argument("--wait", action="store_true")
 
     auth = subcommands.add_parser("auth", help="manage Overleaf HTTP auth session")
     auth_subcommands = auth.add_subparsers(dest="auth_command", required=True)
@@ -59,7 +66,17 @@ def build_parser() -> argparse.ArgumentParser:
     login.add_argument("--session-file", help="path to session JSON file")
     login.add_argument("--email", help="Overleaf email for password login")
     login.add_argument("--password", help="Overleaf password; prompts if omitted with --email")
+    login.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="read the Overleaf password from standard input",
+    )
     login.add_argument("--cookie", help='raw Cookie header, e.g. "sharelatex.sid=..."')
+    login.add_argument(
+        "--cookie-stdin",
+        action="store_true",
+        help="read the raw Cookie header from standard input",
+    )
     login.add_argument("--insecure", action="store_true", help="disable TLS verification")
 
     auth_status = auth_subcommands.add_parser("status", help="check saved Overleaf session")
@@ -84,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
                 project_id=args.project_id,
                 project_name=args.project_name,
                 backend_type=args.backend,
+                ssl_verify=_init_ssl_verify_from_args(args),
                 force=args.force,
                 overwrite_config=not args.keep_config,
             )
@@ -91,10 +109,12 @@ def main(argv: list[str] | None = None) -> int:
             engine.pull(wait=args.wait)
         elif args.command == "push":
             engine.push(dry_run=args.dry_run, fast=args.fast, wait=args.wait)
+        elif args.command == "recover":
+            engine.recover(wait=args.wait)
         elif args.command == "status":
             engine.status()
         elif args.command == "verify":
-            engine.verify(allow_diff=args.allow_diff)
+            engine.verify(allow_diff=args.allow_diff, wait=args.wait)
         elif args.command == "auth":
             handle_auth(args)
         else:
@@ -103,6 +123,14 @@ def main(argv: list[str] | None = None) -> int:
     except OlSyncError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("Interrupted.", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        print(f"Unexpected failure: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        engine.close()
 
 
 def _config_or_none():
@@ -146,22 +174,77 @@ def _init_host_from_args(args) -> str:
         ) from exc
 
 
+def _init_ssl_verify_from_args(args) -> bool:
+    if args.insecure:
+        return False
+    session_file = Path.cwd() / ".ol-sync" / "session.json"
+    try:
+        return load_auth_session(session_file).ssl_verify
+    except OlSyncError:
+        return True
+
+
+def _read_secret_from_stdin(label: str) -> str:
+    value = sys.stdin.read().rstrip("\r\n")
+    if not value:
+        raise OlSyncError(f"No {label} was provided on standard input.")
+    return value
+
+
+def _ensure_session_is_ignored(session_file: Path) -> None:
+    repo = Path.cwd().resolve()
+    try:
+        relative = session_file.resolve().relative_to(repo)
+    except ValueError:
+        return
+    entry = ".ol-sync/" if relative.parts[:1] == (".ol-sync",) else f"/{relative.as_posix()}"
+    ensure_gitignore_entry(repo, entry)
+
+
 def handle_auth(args) -> None:
     session_file = _session_file_from_args(args)
     if args.auth_command == "login":
-        if bool(args.email) == bool(args.cookie):
+        cookie_modes = int(bool(args.cookie)) + int(bool(args.cookie_stdin))
+        if cookie_modes > 1:
+            raise OlSyncError("Use only one cookie input method.")
+        if bool(args.email) == bool(cookie_modes):
             raise OlSyncError("Use exactly one login method: --email or --cookie.")
+        if args.password and args.password_stdin:
+            raise OlSyncError("Use only one password input method.")
         host = _host_from_args(args)
-        if args.cookie:
-            auth_session = session_from_cookie_header(host, args.profile, args.cookie)
+        ssl_verify = not args.insecure
+        if cookie_modes:
+            cookie = args.cookie or _read_secret_from_stdin("Cookie header")
+            if args.cookie:
+                print(
+                    "warning: --cookie can expose credentials in shell history; "
+                    "prefer --cookie-stdin.",
+                    file=sys.stderr,
+                )
+            auth_session = session_from_cookie_header(
+                host,
+                args.profile,
+                cookie,
+                ssl_verify=ssl_verify,
+            )
         else:
+            password = args.password
+            if args.password_stdin:
+                password = _read_secret_from_stdin("password")
+            elif args.password:
+                print(
+                    "warning: --password can expose credentials in process listings; "
+                    "prefer the prompt or --password-stdin.",
+                    file=sys.stderr,
+                )
             auth_session = login_with_password(
                 host=host,
                 profile=args.profile,
                 email=args.email,
-                password=args.password,
-                ssl_verify=not args.insecure,
+                password=password,
+                ssl_verify=ssl_verify,
             )
+        _ensure_session_is_ignored(session_file)
         auth_session.save(session_file)
         print(f"Saved Overleaf session to {session_file}")
         return
@@ -169,7 +252,8 @@ def handle_auth(args) -> None:
     if args.auth_command == "status":
         host = _host_from_args(args)
         auth_session = load_auth_session(session_file, expected_host=host)
-        session = auth_session.build_requests_session(ssl_verify=not args.insecure)
+        ssl_verify = False if args.insecure else auth_session.ssl_verify
+        session = auth_session.build_requests_session(ssl_verify=ssl_verify)
         status = check_session(host=host, session=session)
         if status.logged_in:
             identity = status.email or status.user_id or "unknown user"

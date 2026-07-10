@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 
 from ol_ce_sync.errors import DirtyWorktreeError, GitError, SyncConflictError
-from ol_ce_sync.snapshot import is_ignored, reset_directory_from_snapshot
+from ol_ce_sync.snapshot import collect_tree, file_sha256, is_ignored
 
 GIT_IDENTITY = ["-c", "user.name=ol", "-c", "user.email=ol@example.invalid"]
 SYNC_EXCLUDES = ["--", ".", ":(exclude).ol-sync"]
@@ -26,9 +29,20 @@ def run_git(
     *,
     check: bool = True,
     identity: bool = False,
+    env: dict[str, str] | None = None,
 ) -> GitResult:
     cmd = ["git", *GIT_IDENTITY, *args] if identity else ["git", *args]
-    result = subprocess.run(cmd, cwd=repo, text=True, capture_output=True, check=False)
+    process_env = os.environ.copy()
+    if env:
+        process_env.update(env)
+    result = subprocess.run(
+        cmd,
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=process_env,
+    )
     if check and result.returncode != 0:
         raise GitError(
             f"Git command failed: {' '.join(cmd)}\n{result.stderr.strip() or result.stdout.strip()}"
@@ -100,7 +114,13 @@ def conflicted_files(repo: Path) -> list[str]:
 
 
 def has_merge_in_progress(repo: Path) -> bool:
-    return (repo / ".git" / "MERGE_HEAD").exists()
+    result = run_git(repo, ["rev-parse", "--git-path", "MERGE_HEAD"], check=False)
+    if result.returncode != 0:
+        return False
+    path = Path(result.stdout.strip())
+    if not path.is_absolute():
+        path = repo / path
+    return path.exists()
 
 
 def quit_merge(repo: Path) -> None:
@@ -171,21 +191,150 @@ def import_snapshot_to_branch(
     patterns: list[str],
     message: str,
 ) -> str:
-    original_branch = current_branch(repo) if is_git_repo(repo) else ""
-    if branch_exists(repo, branch):
-        switch_branch(repo, branch)
-    else:
-        run_git(repo, ["switch", "--orphan", branch])
-        run_git(repo, ["rm", "-r", "--cached", "."], check=False)
-    reset_directory_from_snapshot(repo, snapshot_dir, patterns)
-    commit = commit_all(repo, message, allow_empty=True, patterns=patterns)
-    remote_commit = commit or head_commit(repo)
-    if original_branch and original_branch != branch:
-        if branch_exists(repo, original_branch):
-            switch_branch(repo, original_branch)
-        else:
-            run_git(repo, ["switch", "-c", original_branch])
+    """Create a snapshot commit without touching the user's index or working tree."""
+    files = collect_tree(snapshot_dir, patterns)
+    parent = head_commit(repo, branch) if branch_exists(repo, branch) else None
+    if parent is not None:
+        # Paths outside sync scope belong to the local repository, not to the
+        # remote snapshot. Carry them forward so merging a new snapshot cannot
+        # stage their deletion merely because Overleaf never contained them.
+        files.update(_ignored_ref_tree_files(repo, parent, patterns))
+
+    with tempfile.TemporaryDirectory(prefix="ol-index-") as temp_dir:
+        index_path = Path(temp_dir) / "index"
+        env = {"GIT_INDEX_FILE": str(index_path)}
+        run_git(repo, ["read-tree", "--empty"], env=env)
+        for path, content in files.items():
+            object_id = _hash_blob(repo, content)
+            run_git(
+                repo,
+                ["update-index", "--add", "--cacheinfo", "100644", object_id, path],
+                env=env,
+            )
+        tree = run_git(repo, ["write-tree"], env=env).stdout.strip()
+
+    commit_args = ["commit-tree", tree, "-m", message]
+    if parent is not None:
+        commit_args.extend(["-p", parent])
+    remote_commit = run_git(repo, commit_args, identity=True).stdout.strip()
+    ref = f"refs/heads/{branch}"
+    update_args = ["update-ref", ref, remote_commit]
+    if parent is not None:
+        update_args.append(parent)
+    run_git(repo, update_args)
     return remote_commit
+
+
+def _hash_blob(repo: Path, content: bytes) -> str:
+    cmd = ["git", "hash-object", "-w", "--stdin"]
+    result = subprocess.run(cmd, cwd=repo, input=content, capture_output=True, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise GitError(f"Git command failed: {' '.join(cmd)}\n{detail}")
+    return result.stdout.decode("ascii").strip()
+
+
+def initialize_unborn_branch_from_ref(repo: Path, ref: str) -> None:
+    """Populate the current unborn branch from ref."""
+    run_git(repo, ["reset", "--hard", ref])
+
+
+def gitlink_paths(repo: Path) -> list[str]:
+    result = run_git(repo, ["ls-files", "--stage", "-z"], check=False)
+    paths: list[str] = []
+    for record in result.stdout.split("\0"):
+        if not record or "\t" not in record:
+            continue
+        metadata, path = record.split("\t", 1)
+        mode = metadata.split(" ", 1)[0]
+        if mode == "160000":
+            paths.append(path)
+    return paths
+
+
+def worktrees_for_branch(repo: Path, branch: str) -> list[str]:
+    result = run_git(repo, ["worktree", "list", "--porcelain"], check=False)
+    worktrees: list[str] = []
+    current_path: str | None = None
+    expected_ref = f"refs/heads/{branch}"
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line.removeprefix("worktree ")
+        elif line == f"branch {expected_ref}" and current_path is not None:
+            worktrees.append(current_path)
+    return worktrees
+
+
+def worktree_sync_files(repo: Path, patterns: list[str]) -> dict[str, bytes]:
+    """Collect tracked files plus untracked files that Git does not ignore."""
+    result = run_git(repo, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+    files: dict[str, bytes] = {}
+    for path in result.stdout.split("\0"):
+        if not path or is_ignored(path, patterns):
+            continue
+        target = repo / path
+        if target.is_file():
+            files[path] = target.read_bytes()
+    return files
+
+
+def worktree_sync_hashes(repo: Path, patterns: list[str]) -> dict[str, str]:
+    result = run_git(repo, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+    files: dict[str, str] = {}
+    for path in result.stdout.split("\0"):
+        if not path or is_ignored(path, patterns):
+            continue
+        target = repo / path
+        if target.is_file():
+            files[path] = file_sha256(target)
+    return files
+
+
+def ref_tree_files(repo: Path, ref: str, patterns: list[str]) -> dict[str, bytes]:
+    result = run_git(repo, ["ls-tree", "-r", "-z", ref])
+    files: dict[str, bytes] = {}
+    for record in result.stdout.split("\0"):
+        if not record or "\t" not in record:
+            continue
+        metadata, path = record.split("\t", 1)
+        _mode, object_type, object_id = metadata.split(" ", 2)
+        if object_type != "blob" or is_ignored(path, patterns):
+            continue
+        files[path] = _read_blob(repo, object_id)
+    return files
+
+
+def ref_tree_hashes(repo: Path, ref: str, patterns: list[str]) -> dict[str, str]:
+    return {
+        path: sha256(content).hexdigest()
+        for path, content in ref_tree_files(repo, ref, patterns).items()
+    }
+
+
+def _read_blob(repo: Path, object_id: str) -> bytes:
+    cmd = ["git", "cat-file", "blob", object_id]
+    result = subprocess.run(cmd, cwd=repo, capture_output=True, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise GitError(f"Git command failed: {' '.join(cmd)}\n{detail}")
+    return result.stdout
+
+
+def _ignored_ref_tree_files(
+    repo: Path,
+    ref: str,
+    patterns: list[str],
+) -> dict[str, bytes]:
+    result = run_git(repo, ["ls-tree", "-r", "-z", ref])
+    files: dict[str, bytes] = {}
+    for record in result.stdout.split("\0"):
+        if not record or "\t" not in record:
+            continue
+        metadata, path = record.split("\t", 1)
+        _mode, object_type, object_id = metadata.split(" ", 2)
+        if object_type == "blob" and is_ignored(path, patterns):
+            files[path] = _read_blob(repo, object_id)
+    return files
 
 
 def merge_branch(
@@ -210,9 +359,21 @@ def merge_branch(
 
 
 def name_status_diff(repo: Path, base: str, head: str = "HEAD") -> list[list[str]]:
-    result = run_git(repo, ["diff", "--name-status", "--find-renames", base, head])
+    result = run_git(repo, ["diff", "--name-status", "-z", "--find-renames", base, head])
+    fields = result.stdout.split("\0")
     rows: list[list[str]] = []
-    for line in result.stdout.splitlines():
-        if line.strip():
-            rows.append(line.split("\t"))
+    index = 0
+    while index < len(fields) and fields[index]:
+        status = fields[index]
+        index += 1
+        if status.startswith(("R", "C")):
+            if index + 1 >= len(fields):
+                raise GitError("Git returned an incomplete rename/copy record")
+            rows.append([status, fields[index], fields[index + 1]])
+            index += 2
+        else:
+            if index >= len(fields):
+                raise GitError("Git returned an incomplete name-status record")
+            rows.append([status, fields[index]])
+            index += 1
     return rows

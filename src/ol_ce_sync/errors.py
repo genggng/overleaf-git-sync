@@ -43,3 +43,15 @@ class UnsupportedBackendOperation(BackendError):
 
 class VerificationError(OlSyncError):
     """Remote verification did not match the expected local state."""
+
+
+class RemoteChangedError(OlSyncError):
+    """The Overleaf project changed after the push baseline was captured."""
+
+
+class RecoveryRequiredError(OlSyncError):
+    """A previous push did not finish and must be recovered first."""
+
+
+class PartialPushError(RecoveryRequiredError):
+    """A push failed after remote mutation may have started."""

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 import zipfile
 from pathlib import Path
 
@@ -31,6 +32,28 @@ def test_safe_extract_zip_blocks_absolute_paths(tmp_path: Path) -> None:
         zf.writestr("/evil.tex", "bad")
 
     with pytest.raises(OlSyncError):
+        safe_extract_zip(archive, tmp_path / "out")
+
+
+def test_safe_extract_zip_rejects_casefold_collision(tmp_path: Path) -> None:
+    archive = tmp_path / "collision.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("Figure.tex", "one")
+        zf.writestr("figure.tex", "two")
+
+    with pytest.raises(OlSyncError, match="collide"):
+        safe_extract_zip(archive, tmp_path / "out")
+
+
+def test_safe_extract_zip_rejects_unicode_normalization_collision(tmp_path: Path) -> None:
+    archive = tmp_path / "unicode-collision.zip"
+    composed = "café.tex"
+    decomposed = unicodedata.normalize("NFD", composed)
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr(composed, "one")
+        zf.writestr(decomposed, "two")
+
+    with pytest.raises(OlSyncError, match="collide"):
         safe_extract_zip(archive, tmp_path / "out")
 
 

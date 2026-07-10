@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ol_ce_sync.errors import ConfigError
+from ol_ce_sync.utils.files import atomic_write_text
 
 LATEX_AUXILIARY_PATTERNS = [
     "*.aux",
-    "*.bbl",
     "*.bcf",
     "*.blg",
     "*.fdb_latexmk",
@@ -21,7 +22,6 @@ LATEX_AUXILIARY_PATTERNS = [
     "*.idx",
     "*.ilg",
     "*.ind",
-    "*.ist",
     "*.lof",
     "*.log",
     "*.lot",
@@ -33,7 +33,6 @@ LATEX_AUXILIARY_PATTERNS = [
     "*.toc",
     "*.vrb",
     "*.xdv",
-    "*.pdf",
 ]
 
 DEFAULT_IGNORE_PATTERNS = [
@@ -43,6 +42,8 @@ DEFAULT_IGNORE_PATTERNS = [
     ".ol-sync/",
     *LATEX_AUXILIARY_PATTERNS,
 ]
+
+LEGACY_AMBIGUOUS_IGNORE_PATTERNS = ["*.bbl", "*.ist", "*.pdf"]
 
 DEFAULT_GITIGNORE_LINES = [
     ".ol-sync/",
@@ -62,9 +63,7 @@ class ProjectConfig:
 class GitConfig:
     main_branch: str = "main"
     remote_branch: str = "overleaf-remote"
-    remote_name: str = "origin"
     require_clean_worktree_before_push: bool = True
-    commit_remote_snapshots: bool = True
 
 
 @dataclass(frozen=True)
@@ -120,11 +119,12 @@ def default_config(
     project_id: str,
     project_name: str = "overleaf-project",
     backend_type: str = "http",
+    ssl_verify: bool = True,
 ) -> Config:
     return Config(
         repo_root=repo_root,
         project=ProjectConfig(host=host, project_id=project_id, project_name=project_name),
-        backend=BackendConfig(type=backend_type),
+        backend=BackendConfig(type=backend_type, ssl_verify=ssl_verify),
     )
 
 
@@ -132,25 +132,40 @@ def load_config(repo_root: Path) -> Config:
     config_path = repo_root / ".ol-sync" / "config.toml"
     if not config_path.exists():
         raise ConfigError(f"Missing config file: {config_path}")
-    data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    try:
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"Invalid config file: {config_path}: {exc}") from exc
     try:
         project = data["project"]
     except KeyError as exc:
         raise ConfigError("Missing [project] section in .ol-sync/config.toml") from exc
-    ignore_patterns = data.get("ignore", {}).get("patterns", DEFAULT_IGNORE_PATTERNS)
-    return Config(
-        repo_root=repo_root,
-        project=ProjectConfig(
-            host=str(project.get("host", "http://localhost")),
-            project_id=str(project["project_id"]),
-            project_name=str(project.get("project_name", project["project_id"])),
-        ),
-        git=GitConfig(**data.get("git", {})),
-        backend=BackendConfig(**data.get("backend", {})),
-        auth=AuthConfig(**data.get("auth", {})),
-        sync=SyncConfig(**data.get("sync", {})),
-        ignore=IgnoreConfig(patterns=list(ignore_patterns)),
-    )
+    git_data = dict(data.get("git", {}))
+    git_data.pop("remote_name", None)
+    git_data.pop("commit_remote_snapshots", None)
+    ignore_patterns = list(data.get("ignore", {}).get("patterns", DEFAULT_IGNORE_PATTERNS))
+    if (
+        len(ignore_patterns) == len(DEFAULT_IGNORE_PATTERNS) + 3
+        and set(ignore_patterns)
+        == set(DEFAULT_IGNORE_PATTERNS) | set(LEGACY_AMBIGUOUS_IGNORE_PATTERNS)
+    ):
+        ignore_patterns = list(DEFAULT_IGNORE_PATTERNS)
+    try:
+        return Config(
+            repo_root=repo_root,
+            project=ProjectConfig(
+                host=str(project.get("host", "http://localhost")),
+                project_id=str(project["project_id"]),
+                project_name=str(project.get("project_name", project["project_id"])),
+            ),
+            git=GitConfig(**git_data),
+            backend=BackendConfig(**data.get("backend", {})),
+            auth=AuthConfig(**data.get("auth", {})),
+            sync=SyncConfig(**data.get("sync", {})),
+            ignore=IgnoreConfig(patterns=ignore_patterns),
+        )
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ConfigError(f"Invalid config values in {config_path}: {exc}") from exc
 
 
 def write_default_config(config: Config, *, force: bool = False) -> None:
@@ -158,41 +173,51 @@ def write_default_config(config: Config, *, force: bool = False) -> None:
     if path.exists() and not force:
         raise ConfigError(f"Config already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    patterns = ",\n  ".join(f'"{pattern}"' for pattern in config.ignore.patterns)
+    def quote(value: object) -> str:
+        return json.dumps(str(value), ensure_ascii=False)
+
+    patterns = ",\n  ".join(quote(pattern) for pattern in config.ignore.patterns)
     text = f"""[project]
-host = "{config.project.host}"
-project_id = "{config.project.project_id}"
-project_name = "{config.project.project_name}"
+host = {quote(config.project.host)}
+project_id = {quote(config.project.project_id)}
+project_name = {quote(config.project.project_name)}
 
 [git]
-main_branch = "{config.git.main_branch}"
-remote_branch = "{config.git.remote_branch}"
-remote_name = "{config.git.remote_name}"
-require_clean_worktree_before_push = true
-commit_remote_snapshots = true
+main_branch = {quote(config.git.main_branch)}
+remote_branch = {quote(config.git.remote_branch)}
+require_clean_worktree_before_push = {str(config.git.require_clean_worktree_before_push).lower()}
 
 [backend]
-type = "{config.backend.type}"
+type = {quote(config.backend.type)}
 timeout = {config.backend.timeout}
-ssl_verify = true
+ssl_verify = {str(config.backend.ssl_verify).lower()}
 
 [auth]
-profile = "{config.auth.profile}"
-session_file = "{config.auth.session_file}"
+profile = {quote(config.auth.profile)}
+session_file = {quote(config.auth.session_file)}
 
 [sync]
-lock_file = "{config.sync.lock_file}"
-snapshot_dir = "{config.sync.snapshot_dir}"
-last_synced_file = "{config.sync.last_synced_file}"
-last_remote_snapshot_file = "{config.sync.last_remote_snapshot_file}"
-dry_run_default = false
+lock_file = {quote(config.sync.lock_file)}
+snapshot_dir = {quote(config.sync.snapshot_dir)}
+last_synced_file = {quote(config.sync.last_synced_file)}
+last_remote_snapshot_file = {quote(config.sync.last_remote_snapshot_file)}
+dry_run_default = {str(config.sync.dry_run_default).lower()}
 
 [ignore]
 patterns = [
   {patterns}
 ]
 """
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text, mode=0o600)
+
+
+def ensure_gitignore_entry(repo_root: Path, entry: str) -> None:
+    path = repo_root / ".gitignore"
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    if entry in {line.strip() for line in existing.splitlines()}:
+        return
+    separator = "" if not existing or existing.endswith("\n") else "\n"
+    atomic_write_text(path, f"{existing}{separator}{entry}\n", mode=0o644)
 
 
 def ensure_default_gitignore(repo_root: Path) -> None:
@@ -205,41 +230,40 @@ def ensure_default_gitignore(repo_root: Path) -> None:
         existing_lines = []
 
     existing_set = {line.strip() for line in existing_lines if line.strip()}
+    legacy_entries = set(LEGACY_AMBIGUOUS_IGNORE_PATTERNS)
+    if set(DEFAULT_GITIGNORE_LINES).issubset(existing_set) and legacy_entries.issubset(
+        existing_set
+    ):
+        existing_lines = [
+            line for line in existing_lines if line.strip() not in legacy_entries
+        ]
+        existing = "\n".join(existing_lines)
+        if existing:
+            existing += "\n"
+        existing_set -= legacy_entries
     missing = [line for line in DEFAULT_GITIGNORE_LINES if line not in existing_set]
     if not missing:
+        if path.exists() and legacy_entries.isdisjoint(existing_set):
+            atomic_write_text(path, existing, mode=0o644)
         return
 
     if not existing:
-        path.write_text("\n".join(missing) + "\n", encoding="utf-8")
+        atomic_write_text(path, "\n".join(missing) + "\n", mode=0o644)
         return
 
     separator = "\n" if not existing.endswith("\n") else ""
     if existing_lines and existing_lines[-1].strip():
         separator += "\n"
-    path.write_text(existing + separator + "\n".join(missing) + "\n", encoding="utf-8")
-
-
-def load_gitignore_patterns(repo_root: Path) -> list[str]:
-    path = repo_root / ".gitignore"
-    if not path.exists():
-        return []
-    patterns: list[str] = []
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or line.startswith("!"):
-            continue
-        if line.startswith("/"):
-            line = line[1:]
-        patterns.append(line)
-    return patterns
+    atomic_write_text(
+        path,
+        existing + separator + "\n".join(missing) + "\n",
+        mode=0o644,
+    )
 
 
 def effective_ignore_patterns(config: Config) -> list[str]:
-    seen: set[str] = set()
-    merged: list[str] = []
-    for pattern in [*config.ignore.patterns, *load_gitignore_patterns(config.repo_root)]:
-        if pattern in seen:
-            continue
-        seen.add(pattern)
-        merged.append(pattern)
-    return merged
+    # Sync filtering is intentionally independent from .gitignore. Git-ignored
+    # untracked files are excluded when collecting the local worktree, while
+    # tracked files remain syncable exactly as Git treats them.
+    mandatory = [".git/", ".ol-sync/", ".env"]
+    return list(dict.fromkeys([*mandatory, *config.ignore.patterns]))

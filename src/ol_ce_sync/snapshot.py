@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import shutil
+import unicodedata
 import zipfile
 from dataclasses import dataclass
 from fnmatch import fnmatch
+from hashlib import sha256
 from pathlib import Path
 
 from ol_ce_sync.errors import OlSyncError
@@ -41,10 +43,21 @@ def is_ignored(path: str, patterns: list[str]) -> bool:
 def safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
     dest_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path) as archive:
+        collision_keys: dict[str, str] = {}
         for member in archive.infolist():
             normalized = normalize_project_path(member.filename)
             if not normalized:
                 continue
+            collision_key = unicodedata.normalize("NFC", normalized).casefold()
+            previous = collision_keys.get(collision_key)
+            if previous is not None and previous != normalized:
+                raise OlSyncError(
+                    "Remote snapshot contains paths that collide on common local filesystems: "
+                    f"{previous!r} and {normalized!r}"
+                )
+            if previous == normalized and not member.is_dir():
+                raise OlSyncError(f"Remote snapshot contains a duplicate path: {normalized}")
+            collision_keys[collision_key] = normalized
             target = dest_dir / normalized
             if member.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
@@ -72,7 +85,33 @@ def collect_tree(root: Path, patterns: list[str]) -> dict[str, bytes]:
     return files
 
 
-def compare_trees(expected: dict[str, bytes], actual: dict[str, bytes]) -> TreeDiff:
+def file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def collect_tree_hashes(root: Path, patterns: list[str]) -> dict[str, str]:
+    files: dict[str, str] = {}
+    if not root.exists():
+        return files
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        try:
+            normalized = normalize_project_path(rel)
+        except OlSyncError:
+            continue
+        if is_ignored(normalized, patterns):
+            continue
+        files[normalized] = file_sha256(path)
+    return files
+
+
+def compare_trees(expected: dict[str, object], actual: dict[str, object]) -> TreeDiff:
     expected_keys = set(expected)
     actual_keys = set(actual)
     added = tuple(sorted(actual_keys - expected_keys))

@@ -7,7 +7,7 @@ import pytest
 from ol_ce_sync import git_ops
 from ol_ce_sync.backends.base import ProjectTree
 from ol_ce_sync.config import default_config, load_config, write_default_config
-from ol_ce_sync.errors import ConfigError, DirtyWorktreeError
+from ol_ce_sync.errors import ConfigError, DirtyWorktreeError, PartialPushError, RemoteChangedError
 from ol_ce_sync.sync_engine import SyncEngine
 from tests.conftest import commit_all, write
 
@@ -79,6 +79,31 @@ class EventuallyConsistentDeleteBackend(FakeBackend):
 
     def delete_path(self, project_id: str, path: str) -> None:
         self.deleted_paths.append(path)
+
+
+class SequencedRecordingBackend(RecordingBackend):
+    def __init__(self, snapshots: list[dict[str, bytes]]) -> None:
+        super().__init__(dict(snapshots[0]))
+        self.snapshots = snapshots
+        self.download_calls = 0
+
+    def download_project_snapshot(self, project_id: str, dest_dir: Path) -> None:
+        index = min(self.download_calls, len(self.snapshots) - 1)
+        self.files = dict(self.snapshots[index])
+        self.download_calls += 1
+        return super().download_project_snapshot(project_id, dest_dir)
+
+
+class FailingSecondWriteBackend(RecordingBackend):
+    def __init__(self, files: dict[str, bytes]) -> None:
+        super().__init__(files)
+        self.write_calls = 0
+
+    def write_text_file(self, project_id: str, path: str, content: str) -> None:
+        self.write_calls += 1
+        if self.write_calls == 2:
+            raise RuntimeError("simulated second write failure")
+        super().write_text_file(project_id, path, content)
 
 
 def write_config(repo: Path) -> None:
@@ -253,6 +278,21 @@ def test_init_on_empty_directory_does_not_fail_before_orphan_switch(
     assert git_ops.branch_exists(repo, "overleaf-remote")
 
 
+def test_init_keeps_pdf_source_asset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(
+        "ol_ce_sync.sync_engine.create_backend",
+        lambda config: FakeBackend({"figures/result.pdf": b"%PDF-source"}),
+    )
+
+    SyncEngine(repo).init(project_id="project123")
+
+    assert (repo / "figures" / "result.pdf").read_bytes() == b"%PDF-source"
+
+
 def test_init_refuses_nonempty_directory_without_force(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -268,7 +308,49 @@ def test_init_refuses_nonempty_directory_without_force(
         SyncEngine(repo).init(project_id="project123")
 
 
-def test_init_allows_existing_git_repo_and_overwrites_config_by_default(
+def test_init_force_preserves_non_git_local_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    write(repo / "notes.tex", "local\n")
+    monkeypatch.setattr(
+        "ol_ce_sync.sync_engine.create_backend",
+        lambda config: FakeBackend({"main.tex": b"remote\n"}),
+    )
+
+    SyncEngine(repo).init(project_id="project123", force=True)
+
+    assert (repo / "notes.tex").read_text(encoding="utf-8") == "local\n"
+    assert (repo / "main.tex").read_text(encoding="utf-8") == "remote\n"
+    assert "local: pre-sync safety snapshot" in git_ops.run_git(
+        repo, ["log", "--format=%s", "--all"]
+    ).stdout
+
+
+def test_init_refuses_to_rebind_existing_repo_without_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git_ops.ensure_git_repo(repo, "main")
+    write(repo / "notes.tex", "local\n")
+    commit_all(repo, "local base")
+    write_config(repo)
+    monkeypatch.setattr(
+        "ol_ce_sync.sync_engine.create_backend",
+        lambda config: FakeBackend({"main.tex": b"remote\n"}),
+    )
+
+    with pytest.raises(ConfigError, match="already bound"):
+        SyncEngine(repo).init(
+            project_id="project999",
+            host="http://example.test",
+            project_name="paper-2",
+        )
+
+
+def test_init_force_can_rebind_existing_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = tmp_path / "repo"
@@ -286,6 +368,7 @@ def test_init_allows_existing_git_repo_and_overwrites_config_by_default(
         project_id="project999",
         host="http://example.test",
         project_name="paper-2",
+        force=True,
     )
 
     config = default_config(
@@ -345,6 +428,87 @@ def test_push_fast_skips_freshness_pull(tmp_path: Path, monkeypatch: pytest.Monk
 
     assert pull_called is False
     assert backend.text_writes["main.tex"] == "updated\n"
+
+
+def test_push_aborts_when_remote_changes_after_freshness_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    prepare_synced_repo(repo)
+    write(repo / "main.tex", "local\n")
+    commit_all(repo, "local update")
+    backend = SequencedRecordingBackend(
+        [
+            {"main.tex": b"base\n"},
+            {"main.tex": b"concurrent remote edit\n"},
+        ]
+    )
+    monkeypatch.setattr("ol_ce_sync.sync_engine.create_backend", lambda config: backend)
+
+    with pytest.raises(RemoteChangedError, match="changed after"):
+        SyncEngine(repo).push()
+
+    assert backend.text_writes == {}
+    assert not (repo / ".ol-sync" / "push_journal.json").exists()
+
+
+def test_push_validates_all_text_encoding_before_remote_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    prepare_synced_repo(repo)
+    (repo / "latin1.tex").write_bytes(b"caf\xe9")
+    commit_all(repo, "add non utf8 file")
+    backend = RecordingBackend({"main.tex": b"base\n"})
+    monkeypatch.setattr("ol_ce_sync.sync_engine.create_backend", lambda config: backend)
+
+    with pytest.raises(ConfigError, match="not valid UTF-8"):
+        SyncEngine(repo).push(fast=True)
+
+    assert backend.text_writes == {}
+
+
+def test_partial_push_keeps_recovery_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    prepare_synced_repo(repo)
+    write(repo / "a.tex", "one\n")
+    write(repo / "b.tex", "two\n")
+    commit_all(repo, "add two files")
+    backend = FailingSecondWriteBackend({"main.tex": b"base\n"})
+    monkeypatch.setattr("ol_ce_sync.sync_engine.create_backend", lambda config: backend)
+
+    with pytest.raises(PartialPushError, match="recover"):
+        SyncEngine(repo).push(fast=True)
+
+    journal = repo / ".ol-sync" / "push_journal.json"
+    assert journal.exists()
+    assert '"completed_indices": [\n    0\n  ]' in journal.read_text(encoding="utf-8")
+
+    SyncEngine(repo).recover()
+
+    assert not journal.exists()
+
+
+def test_push_dry_run_does_not_contact_overleaf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    prepare_synced_repo(repo)
+    write(repo / "main.tex", "local\n")
+    commit_all(repo, "local update")
+    backend = SequencedRecordingBackend([{"main.tex": b"base\n"}])
+    monkeypatch.setattr("ol_ce_sync.sync_engine.create_backend", lambda config: backend)
+
+    SyncEngine(repo).push(dry_run=True)
+
+    assert backend.download_calls == 0
+    assert backend.text_writes == {}
 
 
 def test_second_push_after_successful_push_does_not_create_synthetic_conflict(

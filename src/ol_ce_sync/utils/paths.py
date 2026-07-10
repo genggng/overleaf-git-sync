@@ -27,5 +27,6 @@ def is_special_sync_path(path: str) -> bool:
     return (
         normalized == ".git"
         or normalized.startswith(".git/")
+        or normalized == ".ol-sync"
         or normalized.startswith(".ol-sync/")
     )

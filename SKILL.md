@@ -68,7 +68,8 @@ ol auth login --host http://localhost --email you@example.com
 For the official Overleaf site, cookie login is usually more reliable:
 
 ```bash
-ol auth login --host https://www.overleaf.com --cookie 'overleaf_session2=...'
+printf '%s' 'overleaf_session2=...' | \
+  ol auth login --host https://www.overleaf.com --cookie-stdin
 ```
 
 This stores the session in `.ol-sync/session.json`.
@@ -136,14 +137,15 @@ Then push:
 ol push
 ```
 
-Use fast mode only when the user explicitly accepts the risk and the project is
-effectively single-user:
+Fast mode skips importing the freshness snapshot into Git, but still checks the
+live remote tree before each write:
 
 ```bash
 ol push --fast
 ```
 
-`--fast` skips the freshness pull, but still verifies after push.
+`--fast` aborts if the live remote differs from the saved remote branch and still
+verifies after push.
 
 ### 7. Check or verify when needed
 
@@ -167,8 +169,8 @@ ol verify
 - Do **not** push with a dirty worktree.
 - Do **not** assume `ol status` means the remote is fresh; use `ol verify` for
   real remote comparison.
-- Do **not** use `ol push --fast` unless the user explicitly wants speed over
-  the extra freshness check.
+- Do **not** use `ol push --fast` when remote changes need to be imported and
+  reviewed locally before planning the push.
 
 ## Recommended Agent Workflow
 
@@ -216,6 +218,7 @@ ol push
 - `ol init` — initialize sync metadata in the current directory
 - `ol pull` — import the latest remote snapshot and stage it for review
 - `ol push` — push committed local changes back to Overleaf
-- `ol push --fast` — skip the pre-push freshness pull
+- `ol push --fast` — skip freshness import but retain live baseline checks
+- `ol recover` — import and reconcile an interrupted push through Git
 - `ol status` — show local sync state
 - `ol verify` — compare local contents with the latest remote snapshot
