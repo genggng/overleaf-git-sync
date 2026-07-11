@@ -93,8 +93,38 @@ def force_branch_to_ref(repo: Path, branch: str, ref: str = "HEAD") -> None:
 
 
 def has_dirty_worktree(repo: Path) -> bool:
-    result = run_git(repo, ["status", "--porcelain", "--untracked-files=all", *SYNC_EXCLUDES])
-    return bool(result.stdout.strip())
+    return bool(worktree_changes(repo))
+
+
+def worktree_changes(repo: Path) -> list[dict[str, str | None]]:
+    result = run_git(
+        repo,
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all", *SYNC_EXCLUDES],
+    )
+    fields = result.stdout.split("\0")
+    changes: list[dict[str, str | None]] = []
+    index = 0
+    while index < len(fields) and fields[index]:
+        record = fields[index]
+        index += 1
+        if len(record) < 4 or record[2] != " ":
+            raise GitError("Git returned a malformed porcelain status record")
+        status = record[:2]
+        path = record[3:]
+        old_path = None
+        if status[0] in {"R", "C"} or status[1] in {"R", "C"}:
+            if index >= len(fields):
+                raise GitError("Git returned an incomplete porcelain rename record")
+            old_path = fields[index]
+            index += 1
+        changes.append(
+            {
+                "status": status,
+                "path": path,
+                "old_path": old_path,
+            }
+        )
+    return changes
 
 
 def require_clean_worktree(repo: Path) -> None:

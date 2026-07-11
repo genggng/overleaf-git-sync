@@ -1,0 +1,7 @@
+.vscode/**
+.vscode-test/**
+.gitignore
+.npm-cache/**
+test/**
+node_modules/**
+*.vsix

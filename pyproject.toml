@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "overleaf-git-sync"
-version = "0.2.0"
+version = "0.2.2"
 description = "Agent-safe Git-style synchronization for self-hosted Overleaf Community Edition."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -161,6 +161,35 @@ def test_worktree_collection_keeps_tracked_file_that_is_gitignored(tmp_path: Pat
     assert files["main.tex"] == b"tracked"
 
 
+def test_worktree_changes_preserve_status_and_unusual_paths(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    write(repo / "tracked.tex", "base")
+    commit_all(repo, "base")
+    write(repo / "tracked.tex", "modified")
+    write(repo / "tab\tname.tex", "untracked")
+    write(repo / "line\nbreak.tex", "untracked")
+
+    changes = git_ops.worktree_changes(repo)
+
+    assert {change["path"] for change in changes} == {
+        "tracked.tex",
+        "tab\tname.tex",
+        "line\nbreak.tex",
+    }
+    assert next(change for change in changes if change["path"] == "tracked.tex") == {
+        "status": " M",
+        "path": "tracked.tex",
+        "old_path": None,
+    }
+    assert all(
+        change["status"] == "??"
+        for change in changes
+        if change["path"] != "tracked.tex"
+    )
+
+
 def test_nested_directory_inside_parent_repo_is_not_treated_as_initialized_repo(
     tmp_path: Path,
 ) -> None:

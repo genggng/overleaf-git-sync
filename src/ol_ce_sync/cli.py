@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -51,7 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     push.add_argument("--wait", action="store_true")
 
-    subcommands.add_parser("status", help="show local sync status")
+    status = subcommands.add_parser("status", help="show local sync status")
+    status.add_argument(
+        "--json",
+        action="store_true",
+        help="emit a stable machine-readable status object",
+    )
 
     verify = subcommands.add_parser("verify", help="compare local state with remote snapshot")
     verify.add_argument("--allow-diff", action="store_true")
@@ -112,7 +118,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "recover":
             engine.recover(wait=args.wait)
         elif args.command == "status":
-            engine.status()
+            if args.json:
+                print(json.dumps(engine.status_data(), ensure_ascii=False, sort_keys=True))
+            else:
+                engine.status()
         elif args.command == "verify":
             engine.verify(allow_diff=args.allow_diff, wait=args.wait)
         elif args.command == "auth":

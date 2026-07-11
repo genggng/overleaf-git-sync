@@ -1,0 +1,262 @@
+{
+  "name": "overleaf-git-sync",
+  "displayName": "Overleaf Git Sync",
+  "description": "Safe VS Code commands for syncing a local Git repository with Overleaf CE through the ol CLI.",
+  "version": "0.2.1",
+  "publisher": "genggng",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/genggng/overleaf-git-sync.git",
+    "directory": "vscode-extension"
+  },
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "keywords": [
+    "overleaf",
+    "latex",
+    "git",
+    "sync"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/.ol-sync/config.toml",
+    "onView:overleafGitSync.projects"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Running the ol executable and changing an Overleaf project requires Workspace Trust.",
+      "restrictedConfigurations": [
+        "overleafGitSync.executable"
+      ]
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "overleafGitSync",
+          "title": "Overleaf",
+          "icon": "resources/overleaf.svg"
+        }
+      ]
+    },
+    "views": {
+      "overleafGitSync": [
+        {
+          "id": "overleafGitSync.projects",
+          "name": "Sync Status",
+          "icon": "resources/overleaf.svg",
+          "contextualTitle": "Overleaf Git Sync"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "overleafGitSync.projects",
+        "contents": "No Overleaf sync project was found.\n[Initialize Project](command:overleafGitSync.init)\n[Log In](command:overleafGitSync.authLogin)",
+        "when": "!overleafGitSync.hasProject"
+      }
+    ],
+    "commands": [
+      {
+        "command": "overleafGitSync.init",
+        "title": "Overleaf: Initialize Project",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "overleafGitSync.authLogin",
+        "title": "Overleaf: Log In",
+        "icon": "$(account)"
+      },
+      {
+        "command": "overleafGitSync.authStatus",
+        "title": "Overleaf: Check Login",
+        "icon": "$(pass)"
+      },
+      {
+        "command": "overleafGitSync.status",
+        "title": "Overleaf: Show Sync Status",
+        "icon": "$(info)"
+      },
+      {
+        "command": "overleafGitSync.pull",
+        "title": "Overleaf: Pull",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "overleafGitSync.pushDryRun",
+        "title": "Overleaf: Preview Push",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "overleafGitSync.push",
+        "title": "Overleaf: Push",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "overleafGitSync.verify",
+        "title": "Overleaf: Verify",
+        "icon": "$(verified)"
+      },
+      {
+        "command": "overleafGitSync.recover",
+        "title": "Overleaf: Recover Interrupted Push",
+        "icon": "$(history)"
+      },
+      {
+        "command": "overleafGitSync.showOutput",
+        "title": "Overleaf: Show Output",
+        "icon": "$(output)"
+      },
+      {
+        "command": "overleafGitSync.refreshProjects",
+        "title": "Overleaf: Refresh Projects",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "overleafGitSync.refreshProjects",
+          "when": "view == overleafGitSync.projects",
+          "group": "navigation@1"
+        },
+        {
+          "command": "overleafGitSync.pull",
+          "when": "view == overleafGitSync.projects && isWorkspaceTrusted && overleafGitSync.hasProject",
+          "group": "navigation@2"
+        },
+        {
+          "command": "overleafGitSync.pushDryRun",
+          "when": "view == overleafGitSync.projects && isWorkspaceTrusted && overleafGitSync.hasProject",
+          "group": "navigation@3"
+        },
+        {
+          "command": "overleafGitSync.push",
+          "when": "view == overleafGitSync.projects && isWorkspaceTrusted && overleafGitSync.hasProject",
+          "group": "navigation@4"
+        },
+        {
+          "command": "overleafGitSync.verify",
+          "when": "view == overleafGitSync.projects && isWorkspaceTrusted && overleafGitSync.hasProject",
+          "group": "navigation@5"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "overleafGitSync.pull",
+          "when": "view == overleafGitSync.projects && viewItem == syncProject",
+          "group": "inline@1"
+        },
+        {
+          "command": "overleafGitSync.push",
+          "when": "view == overleafGitSync.projects && viewItem == syncProject",
+          "group": "inline@2"
+        },
+        {
+          "command": "overleafGitSync.recover",
+          "when": "view == overleafGitSync.projects && viewItem == syncProjectRecovery",
+          "group": "inline@1"
+        },
+        {
+          "command": "overleafGitSync.pushDryRun",
+          "when": "view == overleafGitSync.projects && (viewItem == syncProject || viewItem == syncProjectRecovery)",
+          "group": "overleaf@1"
+        },
+        {
+          "command": "overleafGitSync.verify",
+          "when": "view == overleafGitSync.projects && (viewItem == syncProject || viewItem == syncProjectRecovery)",
+          "group": "overleaf@2"
+        },
+        {
+          "command": "overleafGitSync.showOutput",
+          "when": "view == overleafGitSync.projects",
+          "group": "overleaf@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "overleafGitSync.init",
+          "when": "isWorkspaceTrusted"
+        },
+        {
+          "command": "overleafGitSync.authLogin",
+          "when": "isWorkspaceTrusted"
+        },
+        {
+          "command": "overleafGitSync.authStatus",
+          "when": "isWorkspaceTrusted"
+        },
+        {
+          "command": "overleafGitSync.status",
+          "when": "isWorkspaceTrusted && overleafGitSync.hasProject"
+        },
+        {
+          "command": "overleafGitSync.pull",
+          "when": "isWorkspaceTrusted && overleafGitSync.hasProject"
+        },
+        {
+          "command": "overleafGitSync.pushDryRun",
+          "when": "isWorkspaceTrusted && overleafGitSync.hasProject"
+        },
+        {
+          "command": "overleafGitSync.push",
+          "when": "isWorkspaceTrusted && overleafGitSync.hasProject"
+        },
+        {
+          "command": "overleafGitSync.verify",
+          "when": "isWorkspaceTrusted && overleafGitSync.hasProject"
+        },
+        {
+          "command": "overleafGitSync.recover",
+          "when": "isWorkspaceTrusted && overleafGitSync.hasProject"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Overleaf Git Sync",
+      "properties": {
+        "overleafGitSync.executable": {
+          "type": "string",
+          "default": "ol",
+          "scope": "machine-overridable",
+          "description": "Path to the ol executable. The extension invokes it directly without a shell."
+        },
+        "overleafGitSync.showOutputOnSuccess": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Reveal the Overleaf Git Sync output channel after successful commands."
+        },
+        "overleafGitSync.refreshIntervalSeconds": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "maximum": 300,
+          "scope": "window",
+          "description": "Local status refresh interval in seconds. Set to 0 to disable polling; file events still refresh the view."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "check": "node --check src/process.js && node --check src/projects.js && node --check src/status.js && node --check src/tree.js && node --check src/extension.js",
+    "test": "npm run check && node --test test/*.test.js",
+    "vscode:prepublish": "npm test",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.2.1"
+  }
+}

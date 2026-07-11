@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "npm",
+      "script": "test",
+      "path": "vscode-extension/",
+      "group": "test",
+      "problemMatcher": [],
+      "label": "npm: test - vscode-extension"
+    }
+  ]
+}

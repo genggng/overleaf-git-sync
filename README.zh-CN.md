@@ -13,6 +13,19 @@
 
 它不是 Overleaf 官方 Git 集成的替代品，也不实现 Git 协议服务器。
 
+## 开发日志
+
+当前开发版本：CLI `0.2.2`，VS Code 插件 `0.2.1`。
+
+| 日期 | 版本 / 节点 | 重要更新 |
+| --- | --- | --- |
+| 2026-04-29 | `0.1.0` CLI 初版 | 实现 Session 认证、项目初始化、Pull、Push、Status、Verify 和基于 Git 的冲突处理。 |
+| 2026-05 至 2026-06 | 可靠性迭代 | 修复文件夹与删除操作、校准远端分支元数据、保护忽略文件并改进快照暂存。 |
+| 2026-07-10 | `0.2.0` 安全性重构 | 加入远端并发保护、带版本的文本 OT 更新、持久化 Push 日志与恢复、安全快照导入、路径和内容校验、凭据原子写入以及实时故障注入测试。 |
+| 2026-07-11 | CLI 集成接口 | 加入 `ol status --json`、工作区文件详情和最近成功同步时间，供编辑器稳定读取。 |
+| 2026-07-11 | VS Code GUI | 加入原生 Activity Bar 面板，实时显示本地状态和变更文件，并提供 Pull、Preview Push、Push、Verify、Recover 和最近同步时间。 |
+| 2026-07-11 | 安装体验优化 | 支持通过 `uv tool` 一次性全局安装，日常使用不再需要激活开发虚拟环境。 |
+
 ## 当前提供的功能
 
 - `ol auth login`：保存一个已登录的 Overleaf 会话到 `.ol-sync/session.json`
@@ -26,26 +39,72 @@
 
 ## 安装
 
-先把工具安装到一个虚拟环境里。安装完成后，只要激活这个环境，就可以在**任意**
-Overleaf 项目目录里直接使用 `ol`，不需要停留在当前仓库目录。
+使用 `uv` 将工具一次性安装成全局命令。`uv` 仍会为工具维护隔离环境，但之后可以在
+**任意** Overleaf 项目目录直接使用 `ol`，不需要激活本仓库的开发虚拟环境。
 
 在本仓库根目录执行：
 
 ```bash
-uv venv --python 3.13
-uv pip install -e .
-source .venv/bin/activate
-ol --help
+uv tool install --editable .
+uv tool update-shell  # 仅当 ~/.local/bin 尚未加入 PATH 时需要
+ol --version
 ```
 
-激活后，`ol` 会在当前 shell 的 `PATH` 里可用。典型用法是：
+执行 `uv tool update-shell` 后请打开一个新终端。此后不需要停留在本仓库目录，也不
+需要激活 `.venv`。典型用法是：
 
 ```bash
-cd /path/to/overleaf-git-sync
-source .venv/bin/activate
 cd ~/papers/my-paper
 ol auth login --host http://localhost --email you@example.com
 ```
+
+这里使用 `--editable` 安装，因此仓库源码更新后会立即生效。需要移除全局命令时执行
+`uv tool uninstall overleaf-git-sync`。
+
+## VS Code 插件
+
+仓库的 [`vscode-extension/`](vscode-extension/) 目录还提供了原生 VS Code 界面。安装后
+左侧 Activity Bar 会出现 **Overleaf** 图标，其中的 **Sync Status** 面板提供类似 Git
+GUI 的操作方式，日常同步不再需要从命令面板启动。
+
+对于每个已经初始化的项目，面板会显示：
+
+- 当前 Git 分支以及工作区是否干净；
+- 尚未提交的文件和已经提交、等待 Push 的文件操作；
+- Git 合并冲突和中断 Push 的恢复状态；
+- 最近一次成功同步的本地日期和时间；
+- 明确的远端 freshness 状态。
+
+面板顶部和项目行提供 **Refresh**、**Pull**、**Preview Push**、**Push**、**Verify** 和
+**Recover** 按钮。点击变更文件可以直接在编辑器中打开。正式 Push 总会先执行 dry-run
+预览并要求确认；插件不会在保存文件时自动 Push。
+
+插件不会另行实现一套同步逻辑，认证、Git 冲突处理、远端检查、操作日志和最终校验都
+交给 `ol` CLI。请先按上一节安装 CLI，然后构建并安装当前 VSIX：
+
+```bash
+cd vscode-extension
+npm install
+npm run package
+code --install-extension overleaf-git-sync-0.2.1.vsix --force
+```
+
+也可以在 VS Code 中执行 **Extensions: Install from VSIX...**，选择生成的安装包。重载
+VS Code 窗口后，打开包含 `.ol-sync/config.toml` 的本地目录，再点击左侧 Overleaf
+图标。如果尚未发现初始化项目，面板会提供 **Initialize Project** 和 **Log In** 入口。
+
+macOS 从 Dock 启动的 VS Code 不一定会继承 shell 的 `PATH`。这种情况下，应将插件
+指向 `uv tool` 安装的稳定命令，而不是仓库里的 `.venv`：
+
+```json
+{
+  "overleafGitSync.executable": "/Users/you/.local/bin/ol"
+}
+```
+
+侧栏会在 Git 或文件发生变化时刷新本地状态，默认还会每 5 秒刷新一次。它不会在后台
+持续轮询 Overleaf：**No local changes** 只代表本地没有改动，不能证明远端仍是最新。
+需要真实检查远端时，请使用 **Verify** 或 **Pull**。
 
 ## 完整上手流程
 
@@ -64,21 +123,54 @@ cd ~/papers/my-paper
 ol auth login --host http://localhost --email you@example.com
 ```
 
-如果你用的是官方 Overleaf（`https://www.overleaf.com/`），目前更推荐先在网页端登录，
-再直接复用浏览器 Cookie。常见可用的 key 是 `overleaf_session2=...`：
+如果你用的是官方 Overleaf（`https://www.overleaf.com/`），目前更推荐复用浏览器
+Cookie。自托管部署因 SSO、验证码或本地策略无法使用密码登录时，也可以使用此方法。
+
+获取 Cookie header 的步骤如下：
+
+1. 在浏览器中登录 Overleaf 并打开要同步的项目。
+2. 打开浏览器开发者工具，进入 **Network（网络）** 面板，然后刷新页面。
+3. 选择一个发往当前 Overleaf 域名的请求，在 **Request Headers（请求标头）** 中找到
+   `Cookie:`，复制它后面的完整内容。也可以进入 **Application（应用）** 或
+   **Storage（存储）** > **Cookies**，复制相关的 `name=value`。
+
+Cookie 名称会随部署方式变化：自托管 Community Edition 常见的是
+`sharelatex.sid`，官方站点常见的是 `overleaf_session2`。通过标准输入传入复制的值：
 
 ```bash
+# 自托管 Community Edition（常见 Cookie 名称）
+printf '%s' 'sharelatex.sid=...' | \
+  ol auth login --host https://overleaf.example.com --cookie-stdin
+
+# Overleaf 官方站点
 printf '%s' 'overleaf_session2=...' | \
   ol auth login --host https://www.overleaf.com --cookie-stdin
 ```
 
 `--cookie` 和 `--password` 仍为兼容旧脚本而保留，但可能把凭据暴露在 shell history
-或进程列表里；新脚本应使用 stdin 参数或交互式密码提示。
+或进程列表里；新脚本应使用 stdin 参数或交互式密码提示。Session Cookie 可以访问你的
+账号，请勿将它发布到 issue、粘贴进日志，或提交 `.ol-sync/session.json`。
+
+继续之前，先确认保存的会话有效：
+
+```bash
+ol auth status
+```
 
 ### 2. 初始化本地同步仓库
 
+在 Overleaf 中打开要同步的项目，查看浏览器地址栏，例如：
+
+```text
+https://www.overleaf.com/project/67ab12cd34ef567890abcdef
+```
+
+`/project/` 后面的部分（到下一个 `/`、`?` 或 `#` 之前）就是 project ID；上例中为
+`67ab12cd34ef567890abcdef`。`--project-name` 只是本地使用的描述性名称，不必与
+Overleaf 中显示的项目标题完全一致。
+
 ```bash
-ol init --project-id YOUR_PROJECT_ID --project-name my-paper
+ol init --project-id 67ab12cd34ef567890abcdef --project-name my-paper
 ```
 
 这一步会：

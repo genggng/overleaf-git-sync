@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from io import StringIO
 from pathlib import Path
 
 import pytest
 
 from ol_ce_sync.auth import session_from_cookie_header
-from ol_ce_sync.cli import _init_host_from_args, build_parser, handle_auth
+from ol_ce_sync.cli import _init_host_from_args, build_parser, handle_auth, main
 
 
 def test_parser_uses_short_command_name() -> None:
@@ -28,6 +29,39 @@ def test_push_accepts_fast_flag() -> None:
     args = parser.parse_args(["push", "--fast"])
 
     assert args.fast is True
+
+
+def test_status_accepts_json_flag() -> None:
+    args = build_parser().parse_args(["status", "--json"])
+
+    assert args.json is True
+
+
+def test_status_json_is_machine_readable(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = {
+        "schema_version": 1,
+        "branch": "main",
+        "working_tree_clean": True,
+        "changes": [],
+    }
+
+    class FakeEngine:
+        def __init__(self, repo_root: Path) -> None:
+            self.repo_root = repo_root
+
+        def status_data(self) -> dict[str, object]:
+            return payload
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr("ol_ce_sync.cli.SyncEngine", FakeEngine)
+
+    assert main(["status", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == payload
 
 
 def test_init_uses_saved_session_host_by_default(

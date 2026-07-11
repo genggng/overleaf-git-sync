@@ -2,6 +2,16 @@
 
 All notable changes to `overleaf-git-sync` are documented here.
 
+## 0.2.2 - 2026-07-11
+
+- Add the timestamp of the latest successful sync to `ol status --json` and
+  human-readable status output.
+
+## 0.2.1 - 2026-07-11
+
+- Add `ol status --json` schema version 1 for stable editor and automation
+  integrations without parsing human-readable CLI output.
+
 ## 0.2.0 - 2026-07-10
 
 ### Safety

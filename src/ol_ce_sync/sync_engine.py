@@ -6,6 +6,7 @@ import json
 import tempfile
 import time
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ol_ce_sync import git_ops
@@ -308,40 +309,88 @@ class SyncEngine:
                 journal.clear()
 
     def status(self) -> None:
-        config = load_config(self.repo_root)
-        print(f"Current branch: {git_ops.current_branch(self.repo_root)}")
-        clean = "yes" if not git_ops.has_dirty_worktree(self.repo_root) else "no"
-        print(f"Working tree clean: {clean}")
-        last_synced = self._read_metadata(config.sync.last_synced_file) or "(none)"
-        print(f"Last synced commit: {last_synced}")
+        data = self.status_data()
+        print(f"Current branch: {data['branch']}")
+        print(f"Working tree clean: {'yes' if data['working_tree_clean'] else 'no'}")
+        print(f"Last synced commit: {data['last_synced_commit'] or '(none)'}")
+        print(f"Last synced at: {data['last_synced_at'] or '(never)'}")
         print(
             "Last remote snapshot commit: "
-            f"{self._read_metadata(config.sync.last_remote_snapshot_file) or '(none)'}"
+            f"{data['last_remote_snapshot_commit'] or '(none)'}"
         )
-        conflicts = git_ops.conflicted_files(self.repo_root)
+        conflicts = data["conflicts"]
         if conflicts:
             print("Pending conflicts:")
             for path in conflicts:
                 print(f"  - {path}")
         else:
             print("Pending conflicts: none")
-        if self._push_journal().exists():
+        if data["interrupted_push"]:
             print("Interrupted push: yes (run `ol recover`)")
         else:
             print("Interrupted push: none")
 
-        base = self._status_base(config)
-        if base:
-            plan = build_push_plan(self.repo_root, base, self._ignore_patterns(config))
+        if data["changes_known"]:
             print("Files changed locally since latest remote snapshot:")
-            if plan:
-                for op in plan:
-                    print(f"  {op.display_status} {op.path}")
+            changes = data["changes"]
+            if changes:
+                for operation in changes:
+                    if operation["old_path"]:
+                        print(
+                            f"  {operation['display_status']} "
+                            f"{operation['old_path']} -> {operation['path']}"
+                        )
+                    else:
+                        print(f"  {operation['display_status']} {operation['path']}")
             else:
                 print("  (none)")
         else:
             print("Files changed locally since latest remote snapshot: unknown")
         print("Remote freshness: not checked")
+
+    def status_data(self) -> dict[str, object]:
+        config = load_config(self.repo_root)
+        conflicts = git_ops.conflicted_files(self.repo_root)
+        working_tree_changes = git_ops.worktree_changes(self.repo_root)
+        base = self._status_base(config)
+        changes = []
+        if base:
+            plan = build_push_plan(self.repo_root, base, self._ignore_patterns(config))
+            changes = [
+                {
+                    "status": operation.status,
+                    "display_status": operation.display_status,
+                    "path": operation.path,
+                    "old_path": operation.old_path,
+                    "is_text": operation.is_text,
+                }
+                for operation in plan
+            ]
+        last_synced_commit = self._read_metadata(config.sync.last_synced_file)
+        return {
+            "schema_version": 1,
+            "project": {
+                "name": config.project.project_name,
+                "project_id": config.project.project_id,
+                "host": config.project.host,
+            },
+            "repo_root": str(self.repo_root.resolve()),
+            "branch": git_ops.current_branch(self.repo_root),
+            "working_tree_clean": not working_tree_changes,
+            "working_tree_changes": working_tree_changes,
+            "conflicts": conflicts,
+            "interrupted_push": self._push_journal().exists(),
+            "last_synced_commit": last_synced_commit,
+            "last_synced_at": self._metadata_modified_at(config.sync.last_synced_file)
+            if last_synced_commit
+            else None,
+            "last_remote_snapshot_commit": self._read_metadata(
+                config.sync.last_remote_snapshot_file
+            ),
+            "changes_known": base is not None,
+            "changes": changes,
+            "remote_freshness": "not_checked",
+        }
 
     def verify(self, *, allow_diff: bool = False, wait: bool = False) -> None:
         config = load_config(self.repo_root)
@@ -588,6 +637,14 @@ class SyncEngine:
     def _write_metadata(self, relative_path: str, value: str) -> None:
         path = self.repo_root / relative_path
         atomic_write_text(path, value + "\n", mode=0o600)
+
+    def _metadata_modified_at(self, relative_path: str) -> str | None:
+        path = self.repo_root / relative_path
+        try:
+            modified_at = path.stat().st_mtime
+        except FileNotFoundError:
+            return None
+        return datetime.fromtimestamp(modified_at, tz=UTC).isoformat()
 
     def _remote_branch_owner_path(self) -> Path:
         return self.repo_root / ".ol-sync" / "remote_branch_owner.json"

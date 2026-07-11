@@ -15,6 +15,19 @@ This is not a replacement for the official Overleaf Git integration. It is an
 MVP tool for working on an online Overleaf project through a normal local Git
 repository.
 
+## Development Log
+
+Current development versions: CLI `0.2.2`, VS Code extension `0.2.1`.
+
+| Date | Version / milestone | Important changes |
+| --- | --- | --- |
+| 2026-04-29 | `0.1.0` initial CLI | Added session authentication, project initialization, pull, push, status, verify, and Git-based conflict handling. |
+| 2026-05 to 2026-06 | Reliability iterations | Fixed folder and deletion handling, aligned remote-branch metadata, preserved ignored files, and improved snapshot staging. |
+| 2026-07-10 | `0.2.0` safety overhaul | Added remote concurrency guards, versioned text OT updates, durable push journals and recovery, safe snapshot imports, path/content validation, atomic credential storage, and live fault-injection coverage. |
+| 2026-07-11 | CLI integration API | Added `ol status --json`, working-tree details, and the latest successful sync timestamp for editor integrations. |
+| 2026-07-11 | VS Code GUI | Added a native Activity Bar view with live local status, changed-file lists, Pull, Preview Push, Push, Verify, Recover, and last-sync time. |
+| 2026-07-11 | Installation cleanup | Added one-time global installation through `uv tool`, removing the need to activate the development virtual environment for normal use. |
+
 ## Current MVP Status
 
 Important commands:
@@ -34,27 +47,79 @@ Important commands:
 
 ## Installation
 
-Install the tool once into a virtual environment, then use `ol` from any
-Overleaf project directory after activating that environment.
+Install the tool once with `uv` as a global command. This keeps the tool in an
+isolated environment while making `ol` available from any Overleaf project
+directory without activating the repository's development environment.
 
 From this repository root:
 
 ```bash
-uv venv --python 3.13
-uv pip install -e .
-source .venv/bin/activate
-ol --help
+uv tool install --editable .
+uv tool update-shell  # only needed if ~/.local/bin is not already on PATH
+ol --version
 ```
 
-After activation, `ol` is available on your shell `PATH`. You do **not** need to
-stay in this repository directory. A typical flow is:
+Open a new terminal after `uv tool update-shell`. You do **not** need to stay in
+this repository directory or activate `.venv`. A typical flow is:
 
 ```bash
-cd /path/to/overleaf-git-sync
-source .venv/bin/activate
 cd ~/papers/my-paper
 ol auth login --host http://localhost --email you@example.com
 ```
+
+Because this checkout is installed with `--editable`, source-code updates take
+effect immediately. Run `uv tool uninstall overleaf-git-sync` to remove the
+global command.
+
+## VS Code Extension
+
+The repository also includes a native VS Code interface under
+[`vscode-extension/`](vscode-extension/). It adds an **Overleaf** icon to the
+Activity Bar and provides a Git-style **Sync Status** view instead of requiring
+normal operations to be launched from the Command Palette.
+
+For every initialized project, the view shows:
+
+- the current branch and clean or dirty working-tree state;
+- uncommitted files and committed file operations waiting to be pushed;
+- Git conflicts and interrupted-push recovery state;
+- the local date and time of the latest successful sync;
+- explicit remote freshness state.
+
+The view toolbar and project rows provide buttons for **Refresh**, **Pull**,
+**Preview Push**, **Push**, **Verify**, and **Recover**. Clicking a changed file
+opens it in the editor. Push always runs a dry-run preview first and requires
+confirmation; the extension never pushes automatically on save.
+
+The extension delegates all authentication, Git conflict handling, remote
+checks, journaling, and verification to the `ol` CLI. Install the CLI first as
+described above, then build and install the current VSIX:
+
+```bash
+cd vscode-extension
+npm install
+npm run package
+code --install-extension overleaf-git-sync-0.2.1.vsix --force
+```
+
+Alternatively, run **Extensions: Install from VSIX...** in VS Code and select
+the generated file. Reload the VS Code window, open a local folder containing
+`.ol-sync/config.toml`, and click the Overleaf icon. When no initialized project
+is found, the view offers **Initialize Project** and **Log In** links.
+
+On macOS, a VS Code process launched from the Dock may not inherit the shell
+`PATH`. In that case, configure the stable executable installed by `uv tool`:
+
+```json
+{
+  "overleafGitSync.executable": "/Users/you/.local/bin/ol"
+}
+```
+
+The sidebar refreshes local Git and file state on events and every five seconds
+by default. It deliberately does not poll Overleaf in the background: **No
+local changes** does not prove the remote project is current. Use **Verify** or
+**Pull** when an actual remote check is required.
 
 ## End-to-End Workflow
 
@@ -77,22 +142,59 @@ ol auth login --host http://localhost --email you@example.com
 ```
 
 For the official Overleaf site (`https://www.overleaf.com/`), browser-cookie
-login is recommended. Log in on the web first, then reuse the cookie value,
-typically `overleaf_session2=...`:
+login is recommended. The same method works when a self-hosted deployment
+blocks password login with SSO, captcha, or another local policy.
+
+To get the Cookie header:
+
+1. Log in to Overleaf in your browser and open the project.
+2. Open the browser developer tools, select the **Network** tab, and reload the
+   page.
+3. Select a request sent to the Overleaf host. Under **Request Headers**, copy
+   the complete value after `Cookie:`. Alternatively, use **Application** (or
+   **Storage**) > **Cookies** and copy the relevant `name=value` pairs.
+
+Cookie names vary by deployment. Self-hosted Community Edition commonly uses
+`sharelatex.sid`, while the official site commonly uses
+`overleaf_session2`. Pass the copied value through standard input:
 
 ```bash
+# Self-hosted Community Edition (common cookie name)
+printf '%s' 'sharelatex.sid=...' | \
+  ol auth login --host https://overleaf.example.com --cookie-stdin
+
+# Official Overleaf
 printf '%s' 'overleaf_session2=...' | \
   ol auth login --host https://www.overleaf.com --cookie-stdin
 ```
 
 Prefer `--cookie-stdin`, `--password-stdin`, or the interactive password prompt.
 Command-line secret arguments remain for compatibility but may be visible in
-shell history or process listings.
+shell history or process listings. A session cookie grants access to your
+account: never post it in an issue, paste it into logs, or commit
+`.ol-sync/session.json`.
+
+Confirm that the saved session works before continuing:
+
+```bash
+ol auth status
+```
 
 ### 2. Initialize the local sync repository
 
+Open the project in Overleaf and look at its URL:
+
+```text
+https://www.overleaf.com/project/67ab12cd34ef567890abcdef
+```
+
+The segment after `/project/` (and before any following `/`, `?`, or `#`) is the
+project ID. In this example it is `67ab12cd34ef567890abcdef`. `--project-name`
+is only a descriptive local name; it does not have to exactly match the title
+shown by Overleaf.
+
 ```bash
-ol init --project-id YOUR_PROJECT_ID --project-name my-paper
+ol init --project-id 67ab12cd34ef567890abcdef --project-name my-paper
 ```
 
 This step:

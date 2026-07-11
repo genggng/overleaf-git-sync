@@ -150,6 +150,11 @@ Prints local sync state:
 - conflicted files
 - local changes since the latest remote snapshot
 
+`ol status --json` emits schema version 1 for editor integrations. It includes
+project identity, branch, working-tree file changes, conflicts, interrupted-push
+state, committed push-plan operations, sync commit metadata, and the explicit
+`remote_freshness` state. Human-readable output remains the default.
+
 ### `ol verify`
 
 Downloads the latest Overleaf snapshot and compares it with the local normalized project tree. Exits nonzero on mismatch unless `--allow-diff` is passed.
@@ -252,6 +257,17 @@ Key modules:
 - `utils/text.py`: text/binary classification.
 - `utils/logging.py`: simple `[ol]` output.
 - `utils/files.py`: restrictive atomic metadata and credential writes.
+
+VS Code extension root:
+
+```text
+vscode-extension/
+```
+
+The extension uses a native Activity Bar Tree View and invokes the `ol` CLI
+without a shell. It must consume `ol status --json` rather than parse human
+output, must retain Workspace Trust protection, and must not implement a second
+sync backend.
 
 Backend modules:
 
@@ -368,6 +384,7 @@ uv venv --python 3.13
 uv pip install -e ".[dev]"
 .venv/bin/python -m pytest
 .venv/bin/ruff check .
+cd vscode-extension && npm test
 ```
 
 Current tests cover:

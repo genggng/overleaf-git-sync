@@ -134,6 +134,42 @@ def prepare_synced_repo(repo: Path) -> str:
     return head
 
 
+def test_status_data_reports_gui_fields(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    head = prepare_synced_repo(repo)
+    write(repo / "section.tex", "new section\n")
+    commit_all(repo, "add section")
+
+    data = SyncEngine(repo).status_data()
+
+    assert data["schema_version"] == 1
+    assert data["branch"] == "main"
+    assert data["working_tree_clean"] is True
+    assert data["working_tree_changes"] == []
+    assert data["conflicts"] == []
+    assert data["interrupted_push"] is False
+    assert data["last_synced_commit"] == head
+    assert data["last_synced_at"] is not None
+    assert str(data["last_synced_at"]).endswith("+00:00")
+    assert data["changes_known"] is True
+    assert data["remote_freshness"] == "not_checked"
+    assert data["project"] == {
+        "name": "overleaf-project",
+        "project_id": "project123",
+        "host": "http://localhost",
+    }
+    assert data["changes"] == [
+        {
+            "status": "A",
+            "display_status": "A",
+            "path": "section.tex",
+            "old_path": None,
+            "is_text": True,
+        }
+    ]
+
+
 def test_pull_requires_clean_worktree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
