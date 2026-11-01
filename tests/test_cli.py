@@ -76,6 +76,27 @@ def test_init_uses_saved_session_host_by_default(
     assert _init_host_from_args(args) == "http://localhost:3012"
 
 
+def test_auth_status_uses_saved_session_host_before_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    session = session_from_cookie_header("http://localhost:3012", "default", "sharelatex.sid=abc")
+    session.save(tmp_path / ".ol-sync" / "session.json")
+
+    class FakeStatus:
+        logged_in = True
+        email = "user@example.com"
+        user_id = None
+        error = None
+
+    monkeypatch.setattr("ol_ce_sync.cli.check_session", lambda *, host, session: FakeStatus())
+    args = build_parser().parse_args(["auth", "status"])
+
+    handle_auth(args)
+
+    assert "Logged in to http://localhost:3012 as user@example.com" in capsys.readouterr().out
+
+
 def test_cookie_stdin_is_saved_and_ignored_before_init(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
