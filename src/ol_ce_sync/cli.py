@@ -259,7 +259,7 @@ def handle_auth(args) -> None:
         return
 
     if args.auth_command == "status":
-        host = _host_from_args(args)
+        host = _init_host_from_args(args)
         auth_session = load_auth_session(session_file, expected_host=host)
         ssl_verify = False if args.insecure else auth_session.ssl_verify
         session = auth_session.build_requests_session(ssl_verify=ssl_verify)
